@@ -5,7 +5,7 @@ package.domain = org.shifttracker
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 version = 1.0
-requirements = python3,kivy==2.3.1,cython==3.0.11,https://github.com/kivy/pyjnius/archive/master.zip,kivymd
+requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.3.1,cython==3.0.11,pyjnius==https://github.com/kivy/pyjnius/archive/master.zip
 orientation = portrait
 fullscreen = 0
 
