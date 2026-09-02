@@ -50,6 +50,7 @@ class DBManager:
                 id INTEGER PRIMARY KEY,
                 hour_rate REAL,
                 theme TEXT,
+                bg_theme TEXT,
                 op1 TEXT, op2 TEXT, op3 TEXT, op4 TEXT,
                 pin_hash TEXT
             )
@@ -59,10 +60,13 @@ class DBManager:
     def migrate(self):
         """Добавляет новые колонки в уже созданные ранее БД."""
         cursor = self.conn.cursor()
-        cols = [r[1] for r in cursor.execute("PRAGMA table_info(shifts)").fetchall()]
-        if "operator" not in cols:
+        shift_cols = [r[1] for r in cursor.execute("PRAGMA table_info(shifts)").fetchall()]
+        if "operator" not in shift_cols:
             cursor.execute("ALTER TABLE shifts ADD COLUMN operator TEXT")
-            self.conn.commit()
+        cfg_cols = [r[1] for r in cursor.execute("PRAGMA table_info(app_config)").fetchall()]
+        if "bg_theme" not in cfg_cols:
+            cursor.execute("ALTER TABLE app_config ADD COLUMN bg_theme TEXT")
+        self.conn.commit()
 
     def init_default_products(self):
         cursor = self.conn.cursor()
@@ -77,14 +81,16 @@ class DBManager:
         cursor.execute("SELECT COUNT(*) FROM app_config WHERE id=1")
         if cursor.fetchone()[0] == 0:
             cursor.execute("""
-                INSERT INTO app_config (id, hour_rate, theme, op1, op2, op3, op4, pin_hash)
-                VALUES (1, 632.0, 'Aurora Violet', 'Оператор 1', 'Оператор 2', 'Оператор 3', 'Оператор 4', NULL)
+                INSERT INTO app_config (id, hour_rate, theme, bg_theme, op1, op2, op3, op4, pin_hash)
+                VALUES (1, 632.0, 'Aurora Violet', 'Космос (по умолчанию)',
+                        'Оператор 1', 'Оператор 2', 'Оператор 3', 'Оператор 4', NULL)
             """)
             self.conn.commit()
 
     def get_config(self):
         cursor = self.conn.cursor()
-        cursor.execute("SELECT hour_rate, theme, op1, op2, op3, op4, pin_hash FROM app_config WHERE id=1")
+        cursor.execute("SELECT hour_rate, theme, op1, op2, op3, op4, pin_hash, bg_theme "
+                       "FROM app_config WHERE id=1")
         row = cursor.fetchone()
         return {
             "hour_rate": row[0] if row and row[0] is not None else 632.0,
@@ -94,13 +100,15 @@ class DBManager:
             "op3": row[4] if row and row[4] else "Оператор 3",
             "op4": row[5] if row and row[5] else "Оператор 4",
             "pin_hash": row[6] if row else None,
+            "bg_theme": row[7] if row and row[7] else "Космос (по умолчанию)",
         }
 
-    def save_config(self, hour_rate, theme, op1, op2, op3, op4):
+    def save_config(self, hour_rate, theme, op1, op2, op3, op4, bg_theme=None):
         cursor = self.conn.cursor()
         cursor.execute("""
-            UPDATE app_config SET hour_rate=?, theme=?, op1=?, op2=?, op3=?, op4=? WHERE id=1
-        """, (hour_rate, theme, op1, op2, op3, op4))
+            UPDATE app_config SET hour_rate=?, theme=?, op1=?, op2=?, op3=?, op4=?, bg_theme=?
+            WHERE id=1
+        """, (hour_rate, theme, op1, op2, op3, op4, bg_theme))
         self.conn.commit()
 
     def save_pin_hash(self, pin_hash):
