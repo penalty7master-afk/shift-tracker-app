@@ -18,10 +18,9 @@ jobs:
       with:
         python-version: '3.12'
 
-    - name: Install dependencies
+    - name: Install Flet CLI
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
         pip install "flet[all]==0.86.5"
 
     - name: Setup Java JDK 17
@@ -35,6 +34,14 @@ jobs:
       with:
         channel: 'stable'
 
+    - name: Build Android APK
+      run: flet build apk -v
+
+    - name: Upload APK Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: calendar-shifts-pro-apk
+        path: build/apk/*.apk
     - name: Build Android APK
       run: |
         flet build apk . --project "shifts_pro" --module-name main --yes
