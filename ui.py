@@ -4,7 +4,8 @@ import hashlib
 from datetime import datetime
 import calendar
 
-from constants import THEME_ACCENTS, ARRIVAL_OPTIONS, ARRIVAL_LABELS, MONTH_NAMES, WEIGHT_NORM
+from constants import (THEME_ACCENTS, THEME_BACKGROUNDS, DEFAULT_BG_THEME,
+                       ARRIVAL_OPTIONS, ARRIVAL_LABELS, MONTH_NAMES, WEIGHT_NORM)
 from database import db
 from calculations import calculate_salary_and_premium, get_operator_for_date, hours_for_arrival
 
@@ -30,6 +31,15 @@ def main(page: ft.Page):
         """Акцент с заданной прозрачностью: accent_a('40') -> '#40c9a6ff'."""
         return f"#{alpha_hex}{accent().lstrip('#')}"
 
+    def bg_palette():
+        return THEME_BACKGROUNDS.get(config.get("bg_theme"), THEME_BACKGROUNDS[DEFAULT_BG_THEME])
+
+    def sphere_colors():
+        pal = bg_palette()
+        if pal["spheres"]:
+            return pal["spheres"]
+        return [accent_a(a) for a in pal["sphere_alpha"]]
+
     def op_names():
         return [config["op1"], config["op2"], config["op3"], config["op4"]]
 
@@ -41,44 +51,44 @@ def main(page: ft.Page):
         # Flet не всегда пишет ввод в .value до потери фокуса — синхронизируем вручную
         e.control.value = e.data
 
+    # Ссылки на созданные фоны и стеклянные карточки — нужны для смены темы «на лету»
+    _backgrounds = []
+    _glass_cards = []
+
     # ---------- фон: градиент + светящиеся сферы + реальный блюр стекла ----------
     def glowing_background():
-        return ft.Stack(
+        pal = bg_palette()
+        sph = sphere_colors()
+        base = ft.Container(
             expand=True,
-            controls=[
-                ft.Container(
-                    expand=True,
-                    gradient=ft.LinearGradient(
-                        begin=ft.Alignment.TOP_LEFT, end=ft.Alignment.BOTTOM_RIGHT,
-                        colors=["#150e34", "#241a5c", "#123a66"]
-                    ),
-                ),
-                ft.Container(
-                    width=260, height=260, border_radius=260, top=-40, left=-60,
-                    bgcolor="#6693c5fd", blur=ft.Blur(70, 70),
-                ),
-                ft.Container(
-                    width=300, height=300, border_radius=300, top=120, right=-80,
-                    bgcolor="#55c9a6ff", blur=ft.Blur(80, 80),
-                ),
-                ft.Container(
-                    width=260, height=260, border_radius=260, bottom=-40, left=60,
-                    bgcolor="#556ee7b7", blur=ft.Blur(75, 75),
-                ),
-            ],
+            gradient=ft.LinearGradient(
+                begin=ft.Alignment.TOP_LEFT, end=ft.Alignment.BOTTOM_RIGHT,
+                colors=list(pal["gradient"])
+            ),
         )
+        s1 = ft.Container(width=260, height=260, border_radius=260, top=-40, left=-60,
+                          bgcolor=sph[0], blur=ft.Blur(70, 70))
+        s2 = ft.Container(width=300, height=300, border_radius=300, top=120, right=-80,
+                          bgcolor=sph[1], blur=ft.Blur(80, 80))
+        s3 = ft.Container(width=260, height=260, border_radius=260, bottom=-40, left=60,
+                          bgcolor=sph[2], blur=ft.Blur(75, 75))
+        _backgrounds.append((base, s1, s2, s3))
+        return ft.Stack(expand=True, controls=[base, s1, s2, s3])
 
     def glass_card(content_column, **extra):
+        pal = bg_palette()
         params = dict(
             content=content_column,
-            bgcolor="#1affffff",
-            border=ft.Border.all(1, "#26ffffff"),
+            bgcolor=pal["glass"],
+            border=ft.Border.all(1, pal["glass_border"]),
             border_radius=18,
             blur=ft.Blur(24, 24),
             padding=16,
         )
         params.update(extra)
-        return ft.Container(**params)
+        card = ft.Container(**params)
+        _glass_cards.append(card)
+        return card
 
     # ---------- совместимость API диалогов (Flet 0.86 vs старые версии) ----------
     def open_dialog(dlg):
@@ -538,14 +548,30 @@ def main(page: ft.Page):
     settings_button = ft.IconButton(icon=ft.Icons.SETTINGS, icon_color="white", on_click=go_to_settings)
 
     def apply_accent():
-        """Единая точка применения акцентного цвета ко всем экранам."""
+        """Единая точка применения акцента и фоновой палитры ко всем экранам."""
         c = accent()
+        pal = bg_palette()
+        sph = sphere_colors()
+
         page.theme = ft.Theme(color_scheme_seed=c)
+        page.bgcolor = pal["page"]
         pin_title.color = c
         salary_text.color = c
         month_label.color = c
         settings_button.icon_color = c
         nav_bar.indicator_color = accent_a("40")
+        nav_bar.bgcolor = f"#f2{pal['page'].lstrip('#')}"
+
+        for base, s1, s2, s3 in _backgrounds:
+            base.gradient = ft.LinearGradient(
+                begin=ft.Alignment.TOP_LEFT, end=ft.Alignment.BOTTOM_RIGHT,
+                colors=list(pal["gradient"])
+            )
+            s1.bgcolor, s2.bgcolor, s3.bgcolor = sph
+
+        for card in _glass_cards:
+            card.bgcolor = pal["glass"]
+            card.border = ft.Border.all(1, pal["glass_border"])
 
     main_layout = ft.Stack(
         expand=True,
@@ -589,9 +615,29 @@ def main(page: ft.Page):
     op2_field = ft.TextField(label="Оператор 2", expand=True, bgcolor="#14ffffff", color="white", border_color="#33ffffff")
     op3_field = ft.TextField(label="Оператор 3", expand=True, bgcolor="#14ffffff", color="white", border_color="#33ffffff")
     op4_field = ft.TextField(label="Оператор 4", expand=True, bgcolor="#14ffffff", color="white", border_color="#33ffffff")
+
+    def on_accent_change(e):
+        # мгновенный предпросмотр; в БД значение уходит по "Сохранить" или "Назад"
+        config["theme"] = e.data or config["theme"]
+        theme_dropdown.value = config["theme"]
+        apply_accent()
+        page.update()
+
+    def on_bg_change(e):
+        config["bg_theme"] = e.data or config["bg_theme"]
+        bg_dropdown.value = config["bg_theme"]
+        apply_accent()
+        page.update()
+
     theme_dropdown = ft.Dropdown(
         label="Акцентный цвет",
+        on_change=on_accent_change,
         options=[ft.dropdown.Option(name) for name in THEME_ACCENTS.keys()]
+    )
+    bg_dropdown = ft.Dropdown(
+        label="Фон / тональность",
+        on_change=on_bg_change,
+        options=[ft.dropdown.Option(name) for name in THEME_BACKGROUNDS.keys()]
     )
     settings_error = ft.Text("", color="#fca5a5", size=12)
 
@@ -636,6 +682,7 @@ def main(page: ft.Page):
         op3_field.value = cfg["op3"]
         op4_field.value = cfg["op4"]
         theme_dropdown.value = cfg["theme"]
+        bg_dropdown.value = cfg["bg_theme"]
         settings_error.value = ""
         new_product_input.error_text = None
         refresh_products_list()
@@ -655,6 +702,7 @@ def main(page: ft.Page):
             new_rate, theme_dropdown.value or "Aurora Violet",
             clean_op(op1_field.value, "Оператор 1"), clean_op(op2_field.value, "Оператор 2"),
             clean_op(op3_field.value, "Оператор 3"), clean_op(op4_field.value, "Оператор 4"),
+            bg_dropdown.value or DEFAULT_BG_THEME,
         )
         config.update(db.get_config())
 
@@ -694,7 +742,7 @@ def main(page: ft.Page):
                         ft.Row([op1_field, op2_field]),
                         ft.Row([op3_field, op4_field]),
                     ], spacing=6)),
-                    glass_card(ft.Column([theme_dropdown], spacing=6)),
+                    glass_card(ft.Column([theme_dropdown, bg_dropdown], spacing=10)),
                     glass_card(ft.Column([
                         ft.Text("Каталог продукции", size=12, color="#bfffffff"),
                         ft.Row([new_product_input,
@@ -712,6 +760,7 @@ def main(page: ft.Page):
 
     def show_settings_screen():
         open_settings_fields()
+        apply_accent()
         root.content = settings_view
         page.navigation_bar = None
         page.update()
