@@ -1,857 +1,757 @@
-import os
+import flet as ft
 import sqlite3
-import json
 import hashlib
-from datetime import date
-from kivy.app import App
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.floatlayout import FloatLayout
-from kivy.uix.gridlayout import GridLayout
-from kivy.uix.label import Label
-from kivy.uix.textinput import TextInput
-from kivy.uix.button import Button
-from kivy.uix.spinner import Spinner
-from kivy.uix.scrollview import ScrollView
-from kivy.uix.screenmanager import ScreenManager, Screen
-from kivy.uix.slider import Slider
-from kivy.uix.widget import Widget
-from kivy.uix.image import Image as KivyImage
-from kivy.uix.popup import Popup
-from kivy.core.window import Window
-from kivy.graphics import Color, Ellipse, RoundedRectangle, Line
-from kivy.utils import get_color_from_hex
+from datetime import datetime
+import calendar
+import os
 
-# ---------------------------------------------------------------------------
-# Базовая настройка окна
-# ---------------------------------------------------------------------------
-Window.clearcolor = get_color_from_hex("#1c144a")
-# Чтобы системная клавиатура не перекрывала поля ввода (сдвигает контент вверх)
-Window.softinput_mode = "below_target"
+# ==========================================
+# ДВИЖОК БАЗЫ ДАННЫХ
+# ==========================================
+class DBManager:
+    def __init__(self):
+        db_dir = os.getenv("FLET_APP_DATA_DIR", ".")
+        db_path = os.path.join(db_dir, "shifts_pro.db")
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.create_tables()
+        self.init_default_products()
+        self.init_default_config()
 
-MONTH_DAYS = {'Сентябрь': 30, 'Октябрь': 31, 'Ноябрь': 30, 'Декабрь': 31}
+    def create_tables(self):
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS shifts (
+                date TEXT PRIMARY KEY,
+                hours REAL,
+                status TEXT,
+                product TEXT,
+                weight REAL,
+                arrival_status TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS products (
+                name TEXT PRIMARY KEY
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS timeline (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT,
+                event_time TEXT,
+                event_type TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS app_config (
+                id INTEGER PRIMARY KEY,
+                hour_rate REAL,
+                theme TEXT,
+                op1 TEXT, op2 TEXT, op3 TEXT, op4 TEXT,
+                pin_hash TEXT
+            )
+        """)
+        self.conn.commit()
 
-# Акцентные цвета тем (влияют на заголовки и подсветку)
+    def init_default_products(self):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM products")
+        if cursor.fetchone()[0] == 0:
+            cursor.executemany("INSERT INTO products VALUES (?)", [("Продукт 1",), ("Продукт 2",), ("Продукт 3",)])
+            self.conn.commit()
+
+    def init_default_config(self):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM app_config WHERE id=1")
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("""
+                INSERT INTO app_config (id, hour_rate, theme, op1, op2, op3, op4, pin_hash)
+                VALUES (1, 632.0, 'Aurora Violet', 'Оператор 1', 'Оператор 2', 'Оператор 3', 'Оператор 4', NULL)
+            """)
+            self.conn.commit()
+
+    def get_config(self):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT hour_rate, theme, op1, op2, op3, op4, pin_hash FROM app_config WHERE id=1")
+        row = cursor.fetchone()
+        return {
+            "hour_rate": row[0] if row and row[0] is not None else 632.0,
+            "theme": row[1] if row and row[1] else "Aurora Violet",
+            "op1": row[2] if row and row[2] else "Оператор 1",
+            "op2": row[3] if row and row[3] else "Оператор 2",
+            "op3": row[4] if row and row[4] else "Оператор 3",
+            "op4": row[5] if row and row[5] else "Оператор 4",
+            "pin_hash": row[6] if row else None,
+        }
+
+    def save_config(self, hour_rate, theme, op1, op2, op3, op4):
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE app_config SET hour_rate=?, theme=?, op1=?, op2=?, op3=?, op4=? WHERE id=1
+        """, (hour_rate, theme, op1, op2, op3, op4))
+        self.conn.commit()
+
+    def save_pin_hash(self, pin_hash):
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE app_config SET pin_hash=? WHERE id=1", (pin_hash,))
+        self.conn.commit()
+
+    def clear_pin_hash(self):
+        self.save_pin_hash(None)
+
+    def save_shift(self, date_str, hours, status, product, weight, arrival_status):
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO shifts (date, hours, status, product, weight, arrival_status)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date) DO UPDATE SET
+                hours=excluded.hours,
+                status=excluded.status,
+                product=excluded.product,
+                weight=excluded.weight,
+                arrival_status=excluded.arrival_status
+        """, (date_str, hours, status, product, weight, arrival_status))
+        self.conn.commit()
+
+    def get_month_data(self, year, month):
+        cursor = self.conn.cursor()
+        prefix = f"{year}-{month:02d}%"
+        cursor.execute("SELECT date, hours, status, product, weight, arrival_status FROM shifts WHERE date LIKE ?", (prefix,))
+        rows = cursor.fetchall()
+        return {r[0]: {"hours": r[1], "status": r[2], "product": r[3], "weight": r[4], "arrival_status": r[5]} for r in rows}
+
+    def add_timeline_event(self, date_str, event_type):
+        cursor = self.conn.cursor()
+        now_str = datetime.now().strftime("%H:%M:%S")
+        cursor.execute("INSERT INTO timeline (date, event_time, event_type) VALUES (?, ?, ?)", (date_str, now_str, event_type))
+        self.conn.commit()
+
+    def get_timeline(self, date_str):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT event_time, event_type FROM timeline WHERE date = ? ORDER BY id ASC", (date_str,))
+        return cursor.fetchall()
+
+    def get_products(self):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT name FROM products")
+        return [r[0] for r in cursor.fetchall()]
+
+    def add_product(self, name):
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("INSERT INTO products VALUES (?)", (name,))
+            self.conn.commit()
+            return True
+        except Exception:
+            return False
+
+    def delete_product(self, name):
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM products WHERE name = ?", (name,))
+        self.conn.commit()
+
+
+db = DBManager()
+
 THEME_ACCENTS = {
     "Aurora Violet": "#c9a6ff",
     "Midnight Blue": "#7dd3fc",
     "Emerald Mint": "#6ee7b7",
 }
 
-GLASS_FILL = (1, 1, 1, 0.10)      # полупрозрачная заливка "стекла"
-GLASS_BORDER = (1, 1, 1, 0.22)    # тонкая светлая обводка
-CARD_RADIUS = 22
-
-ACCENT_GREEN = "#6ee7b7"
-ACCENT_YELLOW = "#fde68a"
-ACCENT_RED = "#fca5a5"
-ACCENT_BLUE = "#93c5fd"
-TEXT_DIM = "#c9c3e8"
-TEXT_MAIN = "#f5f3ff"
+ARRIVAL_OPTIONS = ["До 20:00", "Буфер (до 20:15)", "Опоздание (до 20:30)"]
 
 
-def add_glass_background(widget, radius=CARD_RADIUS, fill=GLASS_FILL, border=GLASS_BORDER):
-    """Рисует на canvas виджета полупрозрачную скруглённую 'стеклянную' панель,
-    которая сама следует за изменением размера/позиции виджета."""
-    with widget.canvas.before:
-        Color(*fill)
-        rect = RoundedRectangle(pos=widget.pos, size=widget.size, radius=[radius])
-        Color(*border)
-        line = Line(rounded_rectangle=(widget.x, widget.y, widget.width, widget.height, radius), width=1.1)
+# ==========================================
+# ВЫЧИСЛИТЕЛЬНАЯ МАТЕМАТИКА И ЗАРПЛАТА
+# ==========================================
+def calculate_salary_and_premium(year, month, hour_rate):
+    current_data = db.get_month_data(year, month)
 
-    def _update(instance, _value):
-        rect.pos = instance.pos
-        rect.size = instance.size
-        line.rounded_rectangle = (instance.x, instance.y, instance.width, instance.height, radius)
+    total_hours = 0.0
+    real_work_smen_count = 0
 
-    widget.bind(pos=_update, size=_update)
+    for date_str, shift in current_data.items():
+        if shift["status"] == "Рабочая смена":
+            total_hours += shift["hours"] or 0
+            real_work_smen_count += 1
+        # "Выходной для премии" сознательно НЕ учитывается ни в часах, ни в
+        # счётчике смен — это просто информационная отметка в календаре.
+
+    premium_hours = 0
+    if 17 <= real_work_smen_count <= 18:
+        premium_hours = 9
+    elif 19 <= real_work_smen_count <= 20:
+        premium_hours = 12
+    elif 21 <= real_work_smen_count <= 22:
+        premium_hours = 16
+    elif real_work_smen_count == 23:
+        premium_hours = 18
+    elif real_work_smen_count == 24:
+        premium_hours = 20
+    elif real_work_smen_count >= 25:
+        premium_hours = 21
+
+    base_salary = total_hours * hour_rate
+    premium_money = premium_hours * hour_rate
+    total_salary = base_salary + premium_money
+
+    return {
+        "hours_money": base_salary,
+        "premium_money": premium_money,
+        "total_salary": total_salary,
+        "effective_smen": real_work_smen_count,
+        "total_hours": total_hours,
+    }
 
 
-class GlassPanel(BoxLayout):
-    """Контейнер-карточка в стиле 'жидкого стекла': скруглённые углы,
-    полупрозрачная заливка, мягкая обводка."""
-    def __init__(self, **kwargs):
-        radius = kwargs.pop('radius', CARD_RADIUS)
-        super().__init__(**kwargs)
-        add_glass_background(self, radius=radius)
+def get_operator_for_date(date_obj, op_names):
+    base_date = datetime(2026, 9, 1).date()
+    delta_days = (date_obj - base_date).days
+    operator_index = delta_days % 4
+    if operator_index < 0:
+        operator_index += 4
+    return op_names[operator_index]
 
 
-def styled_field(widget_cls, **kwargs):
-    """Хелпер для полей ввода/спиннеров: убирает стандартный фон Kivy
-    и красит его в полупрозрачный 'стеклянный' стиль."""
-    kwargs.setdefault('background_normal', '')
-    kwargs.setdefault('background_active', '')
-    kwargs.setdefault('background_color', (1, 1, 1, 0.14))
-    kwargs.setdefault('foreground_color', get_color_from_hex(TEXT_MAIN))
-    kwargs.setdefault('cursor_color', get_color_from_hex(ACCENT_BLUE))
-    kwargs.setdefault('padding', [14, 10, 14, 10])
-    return widget_cls(**kwargs)
+def hours_for_arrival(arrival_value):
+    """До 20:00 и Буфер -> 11ч без штрафа. Опоздание -> 10ч (минус 1 час)."""
+    if arrival_value == ARRIVAL_OPTIONS[2]:
+        return 10.0
+    return 11.0
 
 
-def section_label(text, color=None, size='13sp'):
-    return Label(
-        text=text, font_size=size, bold=True,
-        color=get_color_from_hex(color or ACCENT_BLUE),
-        size_hint_y=None, height=26, halign='left', valign='middle'
+# ==========================================
+# ИНТЕРФЕЙС ПРИЛОЖЕНИЯ (iOS 26 Liquid Glass)
+# ==========================================
+def main(page: ft.Page):
+    page.title = "КАЛЕНДАРЬ СМЕН PRO"
+    page.theme_mode = ft.ThemeMode.DARK
+    page.padding = 0
+    page.bgcolor = "#0b0818"
+
+    current_date = datetime.now()
+    config = db.get_config()
+
+    def accent():
+        return THEME_ACCENTS.get(config["theme"], THEME_ACCENTS["Aurora Violet"])
+
+    def op_names():
+        return [config["op1"], config["op2"], config["op3"], config["op4"]]
+
+    # ---------- фон: градиент + светящиеся сферы + реальный блюр стекла ----------
+    def glowing_background():
+        return ft.Stack(
+            expand=True,
+            controls=[
+                ft.Container(
+                    expand=True,
+                    gradient=ft.LinearGradient(
+                        begin=ft.alignment.top_left, end=ft.alignment.bottom_right,
+                        colors=["#150e34", "#241a5c", "#123a66"]
+                    ),
+                ),
+                ft.Container(
+                    width=260, height=260, border_radius=260, top=-40, left=-60,
+                    bgcolor="#6693c5fd", blur=ft.Blur(70, 70),
+                ),
+                ft.Container(
+                    width=300, height=300, border_radius=300, top=120, right=-80,
+                    bgcolor="#55c9a6ff", blur=ft.Blur(80, 80),
+                ),
+                ft.Container(
+                    width=260, height=260, border_radius=260, bottom=-40, left=60,
+                    bgcolor="#556ee7b7", blur=ft.Blur(75, 75),
+                ),
+            ],
+        )
+
+    def glass_card(content_column, **extra):
+        params = dict(
+            content=content_column,
+            bgcolor="#1affffff",
+            border=ft.border.all(1, "#26ffffff"),
+            border_radius=18,
+            blur=ft.Blur(24, 24),
+            padding=16,
+        )
+        params.update(extra)
+        return ft.Container(**params)
+
+    # ---------- корневой контейнер, который переключает экраны ----------
+    root = ft.Container(expand=True)
+
+    # ======================================================
+    # PIN-ЭКРАН
+    # ======================================================
+    pin_mode = {"value": "verify", "first_pin": None}
+
+    pin_title = ft.Text("Введите PIN-код", size=20, weight=ft.FontWeight.BOLD, color=accent())
+    pin_hint = ft.Text("", size=12, color="rgba(255,255,255,0.6)")
+    pin_field = ft.TextField(
+        password=True, can_reveal_password=False, keyboard_type=ft.KeyboardType.NUMBER,
+        max_length=6, text_align=ft.TextAlign.CENTER, width=200, autofocus=True,
+        border_color="#33ffffff", bgcolor="#14ffffff", color="white",
+    )
+    pin_error = ft.Text("", color="#fca5a5", size=12)
+
+    def hash_pin(pin):
+        return hashlib.sha256(pin.encode("utf-8")).hexdigest()
+
+    def show_pin_screen():
+        cfg = db.get_config()
+        config["pin_hash"] = cfg["pin_hash"]
+        pin_field.value = ""
+        pin_error.value = ""
+        if cfg["pin_hash"]:
+            pin_mode["value"] = "verify"
+            pin_title.value = "Введите PIN-код"
+            pin_hint.value = ""
+        else:
+            pin_mode["value"] = "setup_new"
+            pin_mode["first_pin"] = None
+            pin_title.value = "Придумайте PIN-код"
+            pin_hint.value = "От 4 до 6 цифр"
+        root.content = pin_view
+        page.navigation_bar = None
+        page.update()
+
+    def on_pin_confirm(e):
+        pin = (pin_field.value or "").strip()
+        if len(pin) < 4:
+            pin_error.value = "Минимум 4 цифры"
+            page.update()
+            return
+
+        mode = pin_mode["value"]
+        if mode == "verify":
+            cfg = db.get_config()
+            if hash_pin(pin) == cfg["pin_hash"]:
+                show_main_screen()
+            else:
+                pin_error.value = "Неверный PIN-код"
+                pin_field.value = ""
+                page.update()
+        elif mode == "setup_new":
+            pin_mode["first_pin"] = pin
+            pin_mode["value"] = "setup_confirm"
+            pin_title.value = "Повторите PIN-код"
+            pin_hint.value = ""
+            pin_field.value = ""
+            pin_error.value = ""
+            page.update()
+        elif mode == "setup_confirm":
+            if pin == pin_mode["first_pin"]:
+                db.save_pin_hash(hash_pin(pin))
+                show_main_screen()
+            else:
+                pin_error.value = "PIN-коды не совпадают, попробуйте снова"
+                pin_mode["value"] = "setup_new"
+                pin_mode["first_pin"] = None
+                pin_title.value = "Придумайте PIN-код"
+                pin_hint.value = "От 4 до 6 цифр"
+                pin_field.value = ""
+                page.update()
+
+    pin_view = ft.Stack(
+        expand=True,
+        controls=[
+            glowing_background(),
+            ft.Container(
+                alignment=ft.alignment.center,
+                expand=True,
+                content=glass_card(
+                    ft.Column(
+                        [
+                            pin_title, pin_hint, pin_field, pin_error,
+                            ft.ElevatedButton("Подтвердить", on_click=on_pin_confirm, width=200),
+                        ],
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=14
+                    ),
+                    width=320,
+                ),
+            ),
+        ],
     )
 
+    # ======================================================
+    # ГЛАВНЫЙ ДАШБОРД / КАЛЕНДАРЬ
+    # ======================================================
+    salary_text = ft.Text("0 ₽", size=32, weight=ft.FontWeight.BOLD, color="white")
+    stats_subtext = ft.Text("", size=12, color="rgba(255,255,255,0.7)")
 
-class BackgroundScreen(Screen):
-    """Базовый экран с общим градиентным фоном 'Liquid Glass'."""
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.root_float = FloatLayout()
-        bg = KivyImage(source='background.png', allow_stretch=True, keep_ratio=False,
-                        size_hint=(1, 1), pos_hint={'x': 0, 'y': 0})
-        self.root_float.add_widget(bg)
-        super(BackgroundScreen, self).add_widget(self.root_float)
+    def update_global_dashboard():
+        calc = calculate_salary_and_premium(current_date.year, current_date.month, config["hour_rate"])
+        salary_text.value = f"{int(calc['total_salary']):,} ₽".replace(",", " ")
+        stats_subtext.value = (f"Часы: {calc['total_hours']} ч | Премия: {int(calc['premium_money'])} ₽ "
+                                f"({calc['effective_smen']} реальных см)")
+        page.update()
 
-    def add_widget(self, widget, *args, **kwargs):
-        # Пока root_float ещё не создан (во время super().__init__ у подклассов) —
-        # ведём себя как обычный Screen.
-        if not hasattr(self, 'root_float'):
-            return super().add_widget(widget, *args, **kwargs)
-        return self.root_float.add_widget(widget, *args, **kwargs)
+    grid_container = ft.Column()
 
+    def build_calendar_grid():
+        grid_container.controls.clear()
+        days_header = ft.Row([
+            ft.Container(ft.Text(d, color="rgba(255,255,255,0.5)", size=12, weight=ft.FontWeight.BOLD),
+                         expand=1, alignment=ft.alignment.center)
+            for d in ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        ], spacing=5)
+        grid_container.controls.append(days_header)
 
-class PieChart(Widget):
-    """Кольцевая (donut) диаграмма в стиле Liquid Glass."""
-    def __init__(self, custom_colors=None, hole_color="#241a5c", **kwargs):
-        super().__init__(**kwargs)
-        self.data = []
-        self.custom_colors = custom_colors if custom_colors else ["#6ee7b7", "#fde68a", "#fca5a5"]
-        self.hole_color = hole_color
-        self.bind(pos=self.draw, size=self.draw)
+        year, month = current_date.year, current_date.month
+        cal = calendar.Calendar(firstweekday=0)
+        month_days = cal.monthdayscalendar(year, month)
+        month_data = db.get_month_data(year, month)
 
-    def update_data(self, values_list):
-        total = sum(values_list)
-        if total == 0:
-            self.data = []
-        else:
-            self.data = [v / total * 360 for v in values_list]
-        self.draw()
-
-    def draw(self, *args):
-        self.canvas.clear()
-        if not self.data or sum(self.data) == 0:
-            with self.canvas:
-                Color(1, 1, 1, 0.10)
-                Ellipse(pos=self.pos, size=self.size)
-            return
-        current_angle = 0
-        with self.canvas:
-            for angle, color in zip(self.data, self.custom_colors):
-                if angle == 0:
-                    continue
-                Color(*get_color_from_hex(color))
-                Ellipse(pos=self.pos, size=self.size, angle_start=current_angle, angle_end=current_angle + angle)
-                current_angle += angle
-            # "дырка" пончика — делает диаграмму кольцевой
-            hole_ratio = 0.55
-            hx = self.x + self.width * (1 - hole_ratio) / 2
-            hy = self.y + self.height * (1 - hole_ratio) / 2
-            Color(*get_color_from_hex(self.hole_color))
-            Ellipse(pos=(hx, hy), size=(self.width * hole_ratio, self.height * hole_ratio))
-
-
-class DonutWithLabel(FloatLayout):
-    """Кольцевая диаграмма с числом-процентом по центру."""
-    def __init__(self, custom_colors=None, **kwargs):
-        super().__init__(size_hint=(None, None), size=(96, 96), **kwargs)
-        self.chart = PieChart(custom_colors=custom_colors, size_hint=(1, 1))
-        self.center_label = Label(text="", font_size='15sp', bold=True,
-                                   color=get_color_from_hex(TEXT_MAIN), size_hint=(1, 1))
-        self.add_widget(self.chart)
-        self.add_widget(self.center_label)
-
-    def update_data(self, values_list, center_text=""):
-        self.chart.update_data(values_list)
-        self.center_label.text = center_text
-
-
-class MainScreen(BackgroundScreen):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.app = App.get_running_app()
-        self.breaks_data = []
-
-        root = BoxLayout(orientation='vertical', padding=14, spacing=10, size_hint=(1, 1))
-
-        # Верхний тулбар
-        top_bar = BoxLayout(orientation='horizontal', size_hint_y=None, height=42)
-        self.title_lbl = Label(text="Мой Календарь Смен", font_size='19sp', bold=True,
-                                color=get_color_from_hex(THEME_ACCENTS["Aurora Violet"]), halign='left')
-        top_bar.add_widget(self.title_lbl)
-        btn_settings = Button(text="\u22ee", font_size='22sp', size_hint_x=None, width=44,
-                               background_normal='', background_color=(1, 1, 1, 0.12),
-                               color=get_color_from_hex(TEXT_MAIN))
-        btn_settings.bind(on_press=self.go_to_settings)
-        top_bar.add_widget(btn_settings)
-        root.add_widget(top_bar)
-
-        # Панель даты — стеклянная карточка
-        date_card = GlassPanel(orientation='horizontal', size_hint_y=None, height=48,
-                                spacing=8, padding=6)
-        self.month_spinner = styled_field(Spinner, text='Сентябрь',
-                                           values=('Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'))
-        self.month_spinner.bind(text=self.on_month_change)
-        date_card.add_widget(self.month_spinner)
-
-        day_values = [str(i) for i in range(1, MONTH_DAYS['Сентябрь'] + 1)]
-        self.day_spinner = styled_field(Spinner, text='1', values=day_values)
-        self.day_spinner.bind(text=self.load_day_data)
-        date_card.add_widget(self.day_spinner)
-        root.add_widget(date_card)
-
-        # Карточка параметров смены
-        day_scroll = ScrollView(size_hint_y=None, height=240)
-        day_card = GlassPanel(orientation='vertical', size_hint_y=None, padding=12, spacing=6)
-        day_card.bind(minimum_height=day_card.setter('height'))
-        grid = GridLayout(cols=2, spacing=8, size_hint_y=None)
-        grid.bind(minimum_height=grid.setter('height'))
-
-        grid.add_widget(section_label("Статус дня:", TEXT_DIM, '12sp'))
-        self.status_spinner = styled_field(
-            Spinner, text='Отработал',
-            values=('Отработал', 'Обычный выходной / Болел', 'Выходной под премию (День 1)',
-                    'Выходной под премию (День 2)', 'Проспал (не пустила охрана)'),
-            size_hint_y=None, height=34
-        )
-        self.status_spinner.bind(text=self.on_status_change)
-        grid.add_widget(self.status_spinner)
-
-        self.lbl_dynamic = section_label("Время приезда (ЧЧ:ММ):", TEXT_DIM, '12sp')
-        grid.add_widget(self.lbl_dynamic)
-        self.input_dynamic = styled_field(TextInput, text="20:00", multiline=False, halign='center',
-                                           size_hint_y=None, height=34)
-        grid.add_widget(self.input_dynamic)
-
-        grid.add_widget(section_label("Фактический старт:", TEXT_DIM, '12sp'))
-        self.input_work_start = styled_field(TextInput, text="20:00", multiline=False, halign='center',
-                                              size_hint_y=None, height=34)
-        grid.add_widget(self.input_work_start)
-
-        grid.add_widget(section_label("Напарник:", TEXT_DIM, '12sp'))
-        self.input_partner = styled_field(TextInput, text="", multiline=False, halign='center',
-                                           size_hint_y=None, height=34)
-        grid.add_widget(self.input_partner)
-
-        grid.add_widget(section_label("Старший (Оператор):", TEXT_DIM, '12sp'))
-        self.operator_spinner = styled_field(Spinner, text='Оператор 1',
-                                              values=('Оператор 1', 'Оператор 2', 'Оператор 3', 'Оператор 4'),
-                                              size_hint_y=None, height=34)
-        grid.add_widget(self.operator_spinner)
-
-        grid.add_widget(section_label("Тип продукции:", TEXT_DIM, '12sp'))
-        self.prod_type_spinner = styled_field(Spinner, text='Не выбрано',
-                                               values=['Не выбрано', '+ Добавить новый тип...'],
-                                               size_hint_y=None, height=34)
-        self.prod_type_spinner.bind(text=self.on_prod_spinner_select)
-        grid.add_widget(self.prod_type_spinner)
-
-        grid.add_widget(section_label("Вес продукции (кг):", TEXT_DIM, '12sp'))
-        self.input_prod = styled_field(TextInput, text="", multiline=False, input_filter='float',
-                                        halign='center', size_hint_y=None, height=34)
-        grid.add_widget(self.input_prod)
-
-        self.btn_add_break = Button(text="+ Перекур / сбой", size_hint_y=None, height=34,
-                                     background_normal='', background_color=(0.55, 0.75, 1, 0.28),
-                                     color=get_color_from_hex(TEXT_MAIN))
-        self.btn_add_break.bind(on_press=self.show_add_break_popup)
-        grid.add_widget(self.btn_add_break)
-
-        self.lbl_breaks_count = Label(text="Событий записано: 0", color=get_color_from_hex(TEXT_DIM),
-                                       font_size='12sp', size_hint_y=None, height=34)
-        grid.add_widget(self.lbl_breaks_count)
-
-        day_card.add_widget(grid)
-        day_scroll.add_widget(day_card)
-        root.add_widget(day_scroll)
-
-        btn_save = Button(text="Сохранить смену", font_size='15sp', bold=True, size_hint_y=None, height=46,
-                           background_normal='', background_color=get_color_from_hex(ACCENT_GREEN),
-                           color=(0.08, 0.1, 0.08, 1))
-        btn_save.bind(on_press=self.save_day_data)
-        root.add_widget(btn_save)
-
-        # --- Аналитика ---
-        analytics_scroll = ScrollView()
-        analytics_box = BoxLayout(orientation='vertical', spacing=10, size_hint_y=None)
-        analytics_box.bind(minimum_height=analytics_box.setter('height'))
-
-        card1 = GlassPanel(orientation='horizontal', size_hint_y=None, height=110, padding=12, spacing=14)
-        col1 = BoxLayout(orientation='vertical', spacing=2)
-        col1.add_widget(section_label("АНАЛИТИКА ПРИБЫТИЯ НА СМЕНУ", ACCENT_GREEN, '12sp'))
-        self.lbl_stat_ontime = Label(text="[color=6ee7b7]\u25cf[/color] Вовремя: 0%", markup=True,
-                                      halign='left', font_size='12sp', color=get_color_from_hex(TEXT_MAIN))
-        self.lbl_stat_buffer = Label(text="[color=fde68a]\u25cf[/color] Ожидание: 0%", markup=True,
-                                      halign='left', font_size='12sp', color=get_color_from_hex(TEXT_MAIN))
-        self.lbl_stat_late = Label(text="[color=fca5a5]\u25cf[/color] Опоздание: 0%", markup=True,
-                                    halign='left', font_size='12sp', color=get_color_from_hex(TEXT_MAIN))
-        for lb in (self.lbl_stat_ontime, self.lbl_stat_buffer, self.lbl_stat_late):
-            lb.bind(size=lambda i, v: setattr(i, 'text_size', (i.width, None)))
-            col1.add_widget(lb)
-        card1.add_widget(col1)
-        self.chart_time = DonutWithLabel(custom_colors=[ACCENT_GREEN, ACCENT_YELLOW, ACCENT_RED])
-        card1.add_widget(self.chart_time)
-        analytics_box.add_widget(card1)
-
-        card2 = GlassPanel(orientation='horizontal', size_hint_y=None, height=110, padding=12, spacing=14)
-        col2 = BoxLayout(orientation='vertical', spacing=2)
-        col2.add_widget(section_label("ВЫРАБОТКА (норма 2100 кг)", ACCENT_BLUE, '12sp'))
-        self.lbl_prod_high = Label(text="[color=6ee7b7]\u25cf[/color] Норма выполнена: 0%", markup=True,
-                                    halign='left', font_size='12sp', color=get_color_from_hex(TEXT_MAIN))
-        self.lbl_prod_low = Label(text="[color=fca5a5]\u25cf[/color] Меньше нормы: 0%", markup=True,
-                                   halign='left', font_size='12sp', color=get_color_from_hex(TEXT_MAIN))
-        for lb in (self.lbl_prod_high, self.lbl_prod_low):
-            lb.bind(size=lambda i, v: setattr(i, 'text_size', (i.width, None)))
-            col2.add_widget(lb)
-        card2.add_widget(col2)
-        self.chart_prod = DonutWithLabel(custom_colors=[ACCENT_GREEN, ACCENT_RED])
-        card2.add_widget(self.chart_prod)
-        analytics_box.add_widget(card2)
-
-        card3 = GlassPanel(orientation='vertical', size_hint_y=None, padding=14, spacing=6)
-        card3.bind(minimum_height=card3.setter('height'))
-        card3.add_widget(section_label("РАСЧЁТ НАЧИСЛЕНИЙ ЗА МЕСЯЦ", "#c9a6ff", '13sp'))
-        self.lbl_out_shifts = Label(text="Отработано смен: 0 ночей", size_hint_y=None, height=22,
-                                     halign='left', font_size='13sp', color=get_color_from_hex(TEXT_MAIN))
-        self.lbl_out_money = Label(text="Чистый оклад за часы: 0 \u20bd", size_hint_y=None, height=22,
-                                    halign='left', font_size='13sp', color=get_color_from_hex(TEXT_MAIN))
-        self.lbl_out_hours = Label(text="Часов премии по таблице: 0 ч.", size_hint_y=None, height=22,
-                                    halign='left', font_size='13sp', color=get_color_from_hex(TEXT_MAIN))
-        self.lbl_out_bonus = Label(text="Сумма премий из таблицы: 0 \u20bd", size_hint_y=None, height=22,
-                                    halign='left', font_size='13sp', color=get_color_from_hex(TEXT_MAIN))
-        self.lbl_out_virtual = Label(text="На премиальных выходных: 0 \u20bd", size_hint_y=None, height=22,
-                                      halign='left', font_size='13sp', color=get_color_from_hex(TEXT_MAIN))
-        self.lbl_out_total = Label(text="ИТОГО К ВЫПЛАТЕ: 0 \u20bd", font_size='17sp', bold=True,
-                                    size_hint_y=None, height=32, color=get_color_from_hex(ACCENT_RED))
-        for lb in (self.lbl_out_shifts, self.lbl_out_money, self.lbl_out_hours,
-                   self.lbl_out_bonus, self.lbl_out_virtual, self.lbl_out_total):
-            lb.bind(size=lambda i, v: setattr(i, 'text_size', (i.width, None)))
-            card3.add_widget(lb)
-        analytics_box.add_widget(card3)
-
-        analytics_scroll.add_widget(analytics_box)
-        root.add_widget(analytics_scroll)
-        self.add_widget(root)
-
-    def on_enter(self):
-        accent = THEME_ACCENTS.get(self.app.config_theme, THEME_ACCENTS["Aurora Violet"])
-        self.title_lbl.color = get_color_from_hex(accent)
-        self.update_products_list()
-        self.update_operators_list()
-        self.load_day_data(None, self.day_spinner.text)
-        self.calculate_all_totals()
-
-    def go_to_settings(self, instance):
-        self.manager.current = 'settings'
-
-    def update_products_list(self):
-        self.app.cursor.execute("SELECT DISTINCT type_name FROM production_types ORDER BY type_name")
-        rows = self.app.cursor.fetchall()
-        menu_items = ['Не выбрано'] + [r[0] for r in rows] + ['+ Добавить новый тип...']
-        self.prod_type_spinner.values = menu_items
-
-    def update_operators_list(self):
-        self.operator_spinner.values = (self.app.op1, self.app.op2, self.app.op3, self.app.op4)
-
-    def auto_calculate_operator(self, day_num):
-        try:
-            months_dict = {'Сентябрь': 9, 'Октябрь': 10, 'Ноябрь': 11, 'Декабрь': 12}
-            m_num = months_dict.get(self.month_spinner.text, 9)
-            d_start = date(2026, 9, 1)
-            d_current = date(2026, m_num, int(day_num))
-            delta_days = (d_current - d_start).days
-            operators = [self.app.op1, self.app.op2, self.app.op3, self.app.op4]
-            idx = delta_days % 4
-            return operators[idx]
-        except Exception:
-            return self.app.op1
-
-    def on_prod_spinner_select(self, spinner, text):
-        if text == '+ Добавить новый тип...':
-            self.show_add_product_popup()
-
-    def show_add_product_popup(self):
-        box = BoxLayout(orientation='vertical', padding=10, spacing=10)
-        box.add_widget(Label(text="Введите название продукции:", font_size='14sp'))
-        new_input = styled_field(TextInput, multiline=False, halign='center', size_hint_y=None, height=35)
-        box.add_widget(new_input)
-        btn_layout = BoxLayout(orientation='horizontal', spacing=8, size_hint_y=None, height=40)
-        btn_add = Button(text="Добавить", bold=True, background_normal='',
-                          background_color=get_color_from_hex(ACCENT_GREEN))
-        btn_close = Button(text="Отмена", background_normal='',
-                            background_color=get_color_from_hex(ACCENT_RED))
-        btn_layout.add_widget(btn_add)
-        btn_layout.add_widget(btn_close)
-        box.add_widget(btn_layout)
-        popup = Popup(title="Новый товар", content=box, size_hint=(0.85, 0.4), auto_dismiss=False)
-
-        def save_new_type(instance):
-            name = new_input.text.strip()
-            if name:
-                self.app.cursor.execute("INSERT OR IGNORE INTO production_types (type_name) VALUES (?)", (name,))
-                self.app.conn.commit()
-                self.update_products_list()
-                self.prod_type_spinner.text = name
-            popup.dismiss()
-
-        btn_add.bind(on_press=save_new_type)
-        btn_close.bind(on_press=popup.dismiss)
-        popup.open()
-
-    def show_add_break_popup(self):
-        box = BoxLayout(orientation='vertical', padding=10, spacing=8)
-        grid = GridLayout(cols=2, spacing=5, size_hint_y=None, height=110)
-        grid.add_widget(Label(text="Ушли (ЧЧ:ММ):"))
-        inp_start = styled_field(TextInput, text="22:00", multiline=False, halign='center')
-        grid.add_widget(inp_start)
-        grid.add_widget(Label(text="Вернулись (ЧЧ:ММ):"))
-        inp_end = styled_field(TextInput, text="22:15", multiline=False, halign='center')
-        grid.add_widget(inp_end)
-        grid.add_widget(Label(text="Причина / Сбой:"))
-        inp_comment = styled_field(TextInput, text="Перекур", multiline=False, halign='center')
-        grid.add_widget(inp_comment)
-        box.add_widget(grid)
-        btn_layout = BoxLayout(orientation='horizontal', spacing=8, size_hint_y=None, height=40)
-        btn_add = Button(text="Записать", bold=True, background_normal='',
-                          background_color=get_color_from_hex(ACCENT_GREEN))
-        btn_close = Button(text="Закрыть", background_normal='',
-                            background_color=get_color_from_hex(ACCENT_RED))
-        btn_layout.add_widget(btn_add)
-        btn_layout.add_widget(btn_close)
-        box.add_widget(btn_layout)
-        popup = Popup(title="Фиксация тайминга события", content=box, size_hint=(0.9, 0.55), auto_dismiss=False)
-
-        def add_break(instance):
-            t_start = inp_start.text.strip()
-            t_end = inp_end.text.strip()
-            comm = inp_comment.text.strip()
-            if t_start and t_end:
-                self.breaks_data.append({"start": t_start, "end": t_end, "comment": comm})
-                self.lbl_breaks_count.text = f"Событий записано: {len(self.breaks_data)}"
-            popup.dismiss()
-
-        btn_add.bind(on_press=add_break)
-        btn_close.bind(on_press=popup.dismiss)
-        popup.open()
-
-    def on_status_change(self, spinner, text):
-        disabled_status = (text != 'Отработал')
-        self.input_dynamic.disabled = self.input_partner.disabled = self.prod_type_spinner.disabled = \
-            self.input_prod.disabled = self.input_work_start.disabled = self.btn_add_break.disabled = \
-            self.operator_spinner.disabled = disabled_status
-        if text == 'Отработал':
-            self.lbl_dynamic.text = "Время приезда (ЧЧ:ММ):"
-            self.input_dynamic.text = "20:00"
-        elif 'Выходной под премию' in text:
-            self.lbl_dynamic.text = "Сумма выплаты премии (\u20bd):"
-            self.input_dynamic.text = "0"
-            self.breaks_data = []
-            self.lbl_breaks_count.text = "Событий записано: 0"
-        else:
-            self.lbl_dynamic.text = "Параметры дня:"
-            self.input_dynamic.text = "0"
-            self.breaks_data = []
-            self.lbl_breaks_count.text = "Событий записано: 0"
-
-    def on_month_change(self, spinner, text):
-        max_day = MONTH_DAYS.get(text, 31)
-        self.day_spinner.values = [str(i) for i in range(1, max_day + 1)]
-        if int(self.day_spinner.text) > max_day:
-            self.day_spinner.text = '1'
-        self.load_day_data(None, self.day_spinner.text)
-        self.calculate_all_totals()
-
-    def load_day_data(self, spinner, day_text):
-        month = self.month_spinner.text
-        day = int(day_text)
-        self.app.cursor.execute(
-            "SELECT status, value_data, partner_name, production_type, production_kg, work_start_time, "
-            "breaks_json, shift_operator FROM calendar_days WHERE month=? AND day=?", (month, day))
-        row = self.app.cursor.fetchone()
-        if row:
-            self.status_spinner.text = row[0]
-            self.on_status_change(None, row[0])
-            self.input_dynamic.text = str(row[1] or "")
-            self.input_partner.text = str(row[2] or "")
-            self.prod_type_spinner.text = str(row[3] or "Не выбрано")
-            self.input_prod.text = str(row[4] or "")
-            self.input_work_start.text = str(row[5] or "20:00")
-            try:
-                self.breaks_data = json.loads(row[6] or "[]")
-            except Exception:
-                self.breaks_data = []
-            self.lbl_breaks_count.text = f"Событий записано: {len(self.breaks_data)}"
-            self.operator_spinner.text = str(row[7] or self.auto_calculate_operator(day_text))
-        else:
-            self.status_spinner.text = 'Отработал'
-            self.on_status_change(None, 'Отработал')
-            self.input_dynamic.text = "20:00"
-            self.input_work_start.text = "20:00"
-            self.input_partner.text = self.input_prod.text = ""
-            self.prod_type_spinner.text = 'Не выбрано'
-            self.breaks_data = []
-            self.lbl_breaks_count.text = "Событий записано: 0"
-            self.operator_spinner.text = self.auto_calculate_operator(day_text)
-
-    def save_day_data(self, instance):
-        month = self.month_spinner.text
-        day = int(self.day_spinner.text)
-        status = self.status_spinner.text
-        value_data = self.input_dynamic.text
-        partner = self.input_partner.text
-        prod_type = self.prod_type_spinner.text
-        prod_weight = self.input_prod.text
-        work_start = self.input_work_start.text
-        breaks_str = json.dumps(self.breaks_data)
-        op_name = self.operator_spinner.text
-        self.app.cursor.execute('''
-            INSERT OR REPLACE INTO calendar_days (month, day, status, value_data, partner_name, production_type, production_kg, work_start_time, breaks_json, shift_operator)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (month, day, status, value_data, partner, prod_type, prod_weight, work_start, breaks_str, op_name))
-        self.app.conn.commit()
-        self.calculate_all_totals()
-
-    def calculate_all_totals(self):
-        month = self.month_spinner.text
-        self.app.cursor.execute("SELECT status, value_data, production_kg FROM calendar_days WHERE month=?", (month,))
-        all_days = self.app.cursor.fetchall()
-        total_shifts, total_hours, virtual_bonus = 0, 0.0, 0.0
-        stat_ontime, stat_buffer, stat_late = 0, 0, 0
-        prod_high, prod_low = 0, 0
-
-        for status, value_data, production_kg in all_days:
-            if status == 'Отработал':
-                total_shifts += 1
-                try:
-                    h, m = map(int, value_data.split(':'))
-                    minutes = h * 60 + m
-                except Exception:
-                    minutes = 20 * 60
-                t20_00, t20_15 = 20 * 60, 20 * 60 + 15
-                if minutes <= t20_00:
-                    stat_ontime += 1
-                    total_hours += 11.0
-                elif t20_00 < minutes <= t20_15:
-                    stat_buffer += 1
-                    total_hours += 11.0
+        for week in month_days:
+            row_days = []
+            for day in week:
+                if day == 0:
+                    row_days.append(ft.Container(expand=1))
                 else:
-                    stat_late += 1
-                    total_hours += 10.0
-                try:
-                    weight = float(production_kg or 0)
-                    if weight >= 2100.0:
-                        prod_high += 1
-                    else:
-                        prod_low += 1
-                except Exception:
-                    prod_low += 1
-            elif 'Выходной под премию' in status:
-                try:
-                    virtual_bonus += float(value_data or 0)
-                except Exception:
-                    pass
+                    d_obj = datetime(year, month, day).date()
+                    d_str = d_obj.strftime("%Y-%m-%d")
+                    op_name = get_operator_for_date(d_obj, op_names())
 
-        t_time = stat_ontime + stat_buffer + stat_late
-        ontime_pct = round(stat_ontime / t_time * 100) if t_time > 0 else 0
-        self.chart_time.update_data([stat_ontime, stat_buffer, stat_late], f"{ontime_pct}%")
+                    bg_color = "transparent"
+                    border_color = "rgba(255,255,255,0.14)"
 
-        t_prod = prod_high + prod_low
-        prod_pct = round(prod_high / t_prod * 100) if t_prod > 0 else 0
-        self.chart_prod.update_data([prod_high, prod_low], f"{prod_pct}%")
+                    if d_str in month_data:
+                        status = month_data[d_str]["status"]
+                        if status == "Рабочая смена":
+                            bg_color = "rgba(255, 255, 255, 0.10)"
+                        elif status == "Выходной для премии":
+                            bg_color = "rgba(76, 175, 80, 0.25)"
+                            border_color = "rgba(76, 175, 80, 0.6)"
+                        elif status == "Обычный выходной":
+                            bg_color = "rgba(33, 150, 243, 0.25)"
+                            border_color = "rgba(33, 150, 243, 0.6)"
+                        elif status == "Проспал":
+                            bg_color = "rgba(244, 67, 54, 0.3)"
+                            border_color = "rgba(244, 67, 54, 0.7)"
 
-        self.lbl_stat_ontime.text = (f"[color=6ee7b7]\u25cf[/color] Вовремя: "
-                                      f"{(stat_ontime / t_time * 100):.0f}% ({stat_ontime} см)") if t_time > 0 \
-            else "[color=6ee7b7]\u25cf[/color] Вовремя: 0%"
-        self.lbl_stat_buffer.text = (f"[color=fde68a]\u25cf[/color] Ожидание: "
-                                      f"{(stat_buffer / t_time * 100):.0f}% ({stat_buffer} см)") if t_time > 0 \
-            else "[color=fde68a]\u25cf[/color] Ожидание: 0%"
-        self.lbl_stat_late.text = (f"[color=fca5a5]\u25cf[/color] Опоздание: "
-                                    f"{(stat_late / t_time * 100):.0f}% ({stat_late} см)") if t_time > 0 \
-            else "[color=fca5a5]\u25cf[/color] Опоздание: 0%"
+                    def on_day_click(e, sel_date=d_obj):
+                        show_day_details_modal(sel_date)
 
-        self.lbl_prod_high.text = (f"[color=6ee7b7]\u25cf[/color] Норма выполнена: "
-                                    f"{(prod_high / t_prod * 100):.0f}% ({prod_high} см)") if t_prod > 0 \
-            else "[color=6ee7b7]\u25cf[/color] Норма выполнена: 0%"
-        self.lbl_prod_low.text = (f"[color=fca5a5]\u25cf[/color] Меньше нормы: "
-                                   f"{(prod_low / t_prod * 100):.0f}% ({prod_low} см)") if t_prod > 0 \
-            else "[color=fca5a5]\u25cf[/color] Меньше нормы: 0%"
+                    cell = ft.Container(
+                        content=ft.Column([
+                            ft.Text(str(day), size=14, weight=ft.FontWeight.BOLD, color="white"),
+                            ft.Text(op_name.split()[-1], size=9, color="rgba(255,255,255,0.45)")
+                        ], alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=1),
+                        expand=1, height=52, bgcolor=bg_color,
+                        border=ft.border.all(1, border_color), border_radius=10,
+                        on_click=on_day_click
+                    )
+                    row_days.append(cell)
+            grid_container.controls.append(ft.Row(row_days, spacing=5))
+        page.update()
 
-        hour_cost = self.app.config_hour_rate
-        salary_money = total_hours * hour_cost
+    def show_day_details_modal(date_obj):
+        date_str = date_obj.strftime("%Y-%m-%d")
+        month_data = db.get_month_data(date_obj.year, date_obj.month)
+        current_shift = month_data.get(date_str, {
+            "hours": 11.0, "status": "Рабочая смена", "product": "Продукт 1",
+            "weight": 2100.0, "arrival_status": ARRIVAL_OPTIONS[0]
+        })
 
-        if total_shifts >= 25:
-            bonus_hours = 21
-        elif total_shifts == 24:
-            bonus_hours = 20
-        elif total_shifts == 23:
-            bonus_hours = 18
-        elif 21 <= total_shifts <= 22:
-            bonus_hours = 16
-        elif 19 <= total_shifts <= 20:
-            bonus_hours = 12
-        elif 17 <= total_shifts <= 18:
-            bonus_hours = 9
-        else:
-            bonus_hours = 0
+        status_dropdown = ft.Dropdown(
+            label="Статус дня", value=current_shift["status"],
+            options=[ft.dropdown.Option("Рабочая смена"), ft.dropdown.Option("Выходной для премии"),
+                     ft.dropdown.Option("Обычный выходной"), ft.dropdown.Option("Проспал")]
+        )
 
-        table_bonus_money = bonus_hours * hour_cost
-        grand_total = salary_money + table_bonus_money + virtual_bonus
+        hours_slider = ft.Slider(min=0, max=11, divisions=22, value=current_shift["hours"] or 11.0, label="{value} ч")
 
-        self.lbl_out_shifts.text = f"Отработано смен за месяц: {total_shifts} ночей"
-        self.lbl_out_money.text = f"Чистый оклад за часы: {salary_money:,.0f} \u20bd".replace(",", " ")
-        self.lbl_out_hours.text = f"Часов премии по таблице: {bonus_hours} ч."
-        self.lbl_out_bonus.text = f"Сумма премий из таблицы: {table_bonus_money:,.0f} \u20bd".replace(",", " ")
-        self.lbl_out_virtual.text = f"На премиальных выходных: {virtual_bonus:,.0f} \u20bd".replace(",", " ")
-        self.lbl_out_total.text = f"ИТОГО К ВЫПЛАТЕ: {grand_total:,.0f} \u20bd".replace(",", " ")
-
-
-class SettingsScreen(BackgroundScreen):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.app = App.get_running_app()
-
-        outer = BoxLayout(orientation='vertical', padding=14, size_hint=(1, 1))
-        scroll = ScrollView()
-        content = BoxLayout(orientation='vertical', spacing=12, size_hint_y=None, padding=(0, 4))
-        content.bind(minimum_height=content.setter('height'))
-
-        content.add_widget(section_label("Настройки", "#c9a6ff", '17sp'))
-
-        card_rate = GlassPanel(orientation='vertical', size_hint_y=None, padding=12, spacing=6)
-        card_rate.bind(minimum_height=card_rate.setter('height'))
-        card_rate.add_widget(section_label("Стоимость 1 часа оклада (\u20bd):", TEXT_DIM, '12sp'))
-        self.input_rate = styled_field(TextInput, text=str(self.app.config_hour_rate), multiline=False,
-                                        input_filter='float', halign='center', size_hint_y=None, height=38)
-        card_rate.add_widget(self.input_rate)
-        content.add_widget(card_rate)
-
-        card_ops = GlassPanel(orientation='vertical', size_hint_y=None, padding=12, spacing=8)
-        card_ops.bind(minimum_height=card_ops.setter('height'))
-        card_ops.add_widget(section_label("Имена четырёх сменных операторов:", ACCENT_BLUE, '12sp'))
-        grid_ops = GridLayout(cols=2, spacing=6, size_hint_y=None, height=80)
-        self.in_op1 = styled_field(TextInput, text=self.app.op1, multiline=False, halign='center')
-        self.in_op2 = styled_field(TextInput, text=self.app.op2, multiline=False, halign='center')
-        self.in_op3 = styled_field(TextInput, text=self.app.op3, multiline=False, halign='center')
-        self.in_op4 = styled_field(TextInput, text=self.app.op4, multiline=False, halign='center')
-        for w in (self.in_op1, self.in_op2, self.in_op3, self.in_op4):
-            grid_ops.add_widget(w)
-        card_ops.add_widget(grid_ops)
-        content.add_widget(card_ops)
-
-        card_theme = GlassPanel(orientation='vertical', size_hint_y=None, padding=12, spacing=8)
-        card_theme.bind(minimum_height=card_theme.setter('height'))
-        card_theme.add_widget(section_label("Акцентный цвет интерфейса:", TEXT_DIM, '12sp'))
-        self.theme_spinner = styled_field(Spinner, text=self.app.config_theme,
-                                           values=tuple(THEME_ACCENTS.keys()), size_hint_y=None, height=38)
-        card_theme.add_widget(self.theme_spinner)
-        card_theme.add_widget(section_label("Размер шрифта статистики:", TEXT_DIM, '12sp'))
-        self.font_slider = Slider(min=10, max=22, value=self.app.config_font_size, size_hint_y=None, height=32)
-        card_theme.add_widget(self.font_slider)
-        content.add_widget(card_theme)
-
-        btn_change_pin = Button(text="Сменить PIN-код", size_hint_y=None, height=42,
-                                 background_normal='', background_color=(1, 1, 1, 0.14),
-                                 color=get_color_from_hex(TEXT_MAIN))
-        btn_change_pin.bind(on_press=self.change_pin)
-        content.add_widget(btn_change_pin)
-
-        btn_back = Button(text="Применить и назад", bold=True, size_hint_y=None, height=48,
-                           background_normal='', background_color=get_color_from_hex(ACCENT_GREEN),
-                           color=(0.08, 0.1, 0.08, 1))
-        btn_back.bind(on_press=self.save_settings)
-        content.add_widget(btn_back)
-
-        scroll.add_widget(content)
-        outer.add_widget(scroll)
-        self.add_widget(outer)
-
-    def change_pin(self, instance):
-        self.app.cursor.execute("UPDATE app_config SET pin_hash=NULL WHERE id=1")
-        self.app.conn.commit()
-        self.manager.current = 'pin'
-
-    def save_settings(self, instance):
         try:
-            self.app.config_hour_rate = float(self.input_rate.text or 632.0)
+            arrival_index = ARRIVAL_OPTIONS.index(current_shift.get("arrival_status") or ARRIVAL_OPTIONS[0])
+        except ValueError:
+            arrival_index = 0
+
+        def on_arrival_change(e):
+            hours_slider.value = hours_for_arrival(ARRIVAL_OPTIONS[arrival_seg.selected_index])
+            page.update()
+
+        arrival_seg = ft.CupertinoSlidingSegmentedButton(
+            selected_index=arrival_index,
+            thumb_color=accent(),
+            on_change=on_arrival_change,
+            controls=[ft.Text(opt, size=11) for opt in ARRIVAL_OPTIONS],
+        )
+
+        weight_input = ft.TextField(label="Выработка продукции (кг)", value=str(current_shift.get("weight", 2100.0)),
+                                     keyboard_type=ft.KeyboardType.NUMBER)
+        product_dropdown = ft.Dropdown(label="Тип продукта", value=current_shift.get("product"),
+                                        options=[ft.dropdown.Option(p) for p in db.get_products()])
+
+        timeline_list = ft.Column()
+        for t_time, t_type in db.get_timeline(date_str):
+            timeline_list.controls.append(ft.Text(f"• {t_time} -> {t_type}", color="white", size=12))
+
+        def add_event(e, etype):
+            db.add_timeline_event(date_str, etype)
+            timeline_list.controls.append(ft.Text(f"• {datetime.now().strftime('%H:%M:%S')} -> {etype}",
+                                                    color="white", size=12))
+            page.update()
+
+        def save_and_close(e):
+            arrival_value = ARRIVAL_OPTIONS[arrival_seg.selected_index]
+            db.save_shift(date_str, float(hours_slider.value), status_dropdown.value,
+                          product_dropdown.value, float(weight_input.value or 0), arrival_value)
+            update_global_dashboard()
+            build_calendar_grid()
+            refresh_analytics_tab()
+            page.close(dialog)
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(f"Смена: {date_obj.strftime('%d.%m.%Y')}", color="white"),
+            content=ft.Container(
+                content=ft.Column([
+                    status_dropdown,
+                    ft.Text("Время прибытия:", size=11, color="rgba(255,255,255,0.6)"),
+                    arrival_seg,
+                    ft.Text("Корректировка часов (ручная):", size=11, color="rgba(255,255,255,0.6)"),
+                    hours_slider, product_dropdown, weight_input, ft.Divider(),
+                    ft.Text("Трекер ночи (хронология):", size=12, weight=ft.FontWeight.BOLD),
+                    ft.Row([
+                        ft.ElevatedButton("+ Перекур", on_click=lambda e: add_event(e, "Перекур")),
+                        ft.ElevatedButton("▶ Работа", on_click=lambda e: add_event(e, "Работа")),
+                    ]), timeline_list
+                ], scroll=ft.ScrollMode.ALWAYS, spacing=10), width=400, height=520
+            ),
+            actions=[
+                ft.TextButton("Отмена", on_click=lambda e: page.close(dialog)),
+                ft.TextButton("Сохранить", on_click=save_and_close),
+            ]
+        )
+        page.open(dialog)
+
+    chart_arrival = ft.PieChart(sections=[], sections_space=2, center_space_radius=20, expand=True)
+    chart_weight = ft.PieChart(sections=[], sections_space=2, center_space_radius=20, expand=True)
+
+    def refresh_analytics_tab():
+        month_data = db.get_month_data(current_date.year, current_date.month)
+        vv, bf, op = 0, 0, 0
+        norm_ok, norm_fail = 0, 0
+
+        for shift in month_data.values():
+            if shift["status"] == "Рабочая смена":
+                astat = shift.get("arrival_status") or ARRIVAL_OPTIONS[0]
+                if astat == ARRIVAL_OPTIONS[0]:
+                    vv += 1
+                elif astat == ARRIVAL_OPTIONS[1]:
+                    bf += 1
+                elif astat == ARRIVAL_OPTIONS[2]:
+                    op += 1
+
+                if (shift.get("weight") or 0) >= 2100.0:
+                    norm_ok += 1
+                else:
+                    norm_fail += 1
+
+        total_arr = vv + bf + op
+        if total_arr > 0:
+            chart_arrival.sections = [
+                ft.PieChartSection(vv, color="green", title=f"В-{int(vv/total_arr*100)}%", radius=20),
+                ft.PieChartSection(bf, color="orange", title=f"Б-{int(bf/total_arr*100)}%", radius=20),
+                ft.PieChartSection(op, color="red", title=f"О-{int(op/total_arr*100)}%", radius=20),
+            ]
+        else:
+            chart_arrival.sections = [ft.PieChartSection(1, color="grey", title="Нет данных", radius=20)]
+
+        total_w = norm_ok + norm_fail
+        if total_w > 0:
+            chart_weight.sections = [
+                ft.PieChartSection(norm_ok, color="green", title=f"Норма-{int(norm_ok/total_w*100)}%", radius=20),
+                ft.PieChartSection(norm_fail, color="red", title=f"Недо-{int(norm_fail/total_w*100)}%", radius=20),
+            ]
+        else:
+            chart_weight.sections = [ft.PieChartSection(1, color="grey", title="Нет данных", radius=20)]
+        page.update()
+
+    calendar_view = ft.Column([glass_card(grid_container)])
+
+    analytics_view = ft.Column([
+        ft.Text("ДИАГРАММЫ АНАЛИТИКИ ЗА МЕСЯЦ", size=14, weight=ft.FontWeight.BOLD, color="white"),
+        glass_card(ft.Column([
+            ft.Text("1. Время прибытия (вовремя / буфер / опоздание):", size=11, color="rgba(255,255,255,0.8)"),
+            ft.Container(chart_arrival, height=120, alignment=ft.alignment.center),
+            ft.Text("2. Выработка продукции (норма 2100 кг / недовыработка):", size=11, color="rgba(255,255,255,0.8)"),
+            ft.Container(chart_weight, height=120, alignment=ft.alignment.center),
+        ])),
+    ], scroll=ft.ScrollMode.ALWAYS, expand=True)
+
+    tabs_content = ft.Container(content=calendar_view, expand=True)
+
+    def on_tab_change(e):
+        if e.control.selected_index == 0:
+            tabs_content.content = calendar_view
+        else:
+            tabs_content.content = analytics_view
+            refresh_analytics_tab()
+        page.update()
+
+    nav_bar = ft.NavigationBar(
+        destinations=[
+            ft.NavigationBarDestination(icon=ft.Icons.CALENDAR_MONTH, label="Календарь"),
+            ft.NavigationBarDestination(icon=ft.Icons.BAR_CHART, label="Аналитика"),
+        ],
+        selected_index=0,
+        on_change=on_tab_change,
+        bgcolor="rgba(20, 15, 38, 0.95)"
+    )
+
+    def go_to_settings(e):
+        show_settings_screen()
+
+    settings_button = ft.IconButton(icon=ft.Icons.SETTINGS, icon_color="white", on_click=go_to_settings)
+
+    main_layout = ft.Stack(
+        expand=True,
+        controls=[
+            glowing_background(),
+            ft.Container(
+                expand=True, padding=10,
+                content=ft.Column([
+                    ft.SafeArea(
+                        content=glass_card(
+                            ft.Row([
+                                ft.Column([
+                                    ft.Text("КАЛЕНДАРЬ СМЕН PRO", size=12, color="rgba(255,255,255,0.5)"),
+                                    salary_text, stats_subtext
+                                ], spacing=1, expand=True),
+                                settings_button,
+                            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.START),
+                        )
+                    ),
+                    tabs_content
+                ], expand=True, spacing=10)
+            ),
+        ],
+    )
+
+    def show_main_screen():
+        root.content = main_layout
+        page.navigation_bar = nav_bar
+        build_calendar_grid()
+        update_global_dashboard()
+        page.update()
+
+    # ======================================================
+    # ЭКРАН НАСТРОЕК (ставка, операторы, тема, PIN, продукция)
+    # ======================================================
+    rate_field = ft.TextField(label="Стоимость 1 часа оклада (₽)", keyboard_type=ft.KeyboardType.NUMBER,
+                               bgcolor="#14ffffff", color="white", border_color="#33ffffff")
+    op1_field = ft.TextField(label="Оператор 1", bgcolor="#14ffffff", color="white", border_color="#33ffffff")
+    op2_field = ft.TextField(label="Оператор 2", bgcolor="#14ffffff", color="white", border_color="#33ffffff")
+    op3_field = ft.TextField(label="Оператор 3", bgcolor="#14ffffff", color="white", border_color="#33ffffff")
+    op4_field = ft.TextField(label="Оператор 4", bgcolor="#14ffffff", color="white", border_color="#33ffffff")
+    theme_dropdown = ft.Dropdown(
+        label="Акцентный цвет",
+        options=[ft.dropdown.Option(name) for name in THEME_ACCENTS.keys()]
+    )
+    settings_error = ft.Text("", color="#fca5a5", size=12)
+
+    new_product_input = ft.TextField(label="Название нового продукта", expand=True,
+                                      bgcolor="#14ffffff", color="white", border_color="#33ffffff")
+    products_list_view = ft.Column()
+
+    def refresh_products_list():
+        products_list_view.controls.clear()
+        for p in db.get_products():
+            def delete_click(e, p_name=p):
+                db.delete_product(p_name)
+                refresh_products_list()
+                page.update()
+            products_list_view.controls.append(
+                ft.Row([
+                    ft.Text(p, color="white", expand=True),
+                    ft.IconButton(ft.Icons.DELETE_OUTLINE, icon_color="#fca5a5", on_click=delete_click)
+                ])
+            )
+
+    def add_product_click(e):
+        if new_product_input.value and new_product_input.value.strip():
+            db.add_product(new_product_input.value.strip())
+            new_product_input.value = ""
+            refresh_products_list()
+            page.update()
+
+    def open_settings_fields():
+        cfg = db.get_config()
+        rate_field.value = str(cfg["hour_rate"])
+        op1_field.value = cfg["op1"]
+        op2_field.value = cfg["op2"]
+        op3_field.value = cfg["op3"]
+        op4_field.value = cfg["op4"]
+        theme_dropdown.value = cfg["theme"]
+        settings_error.value = ""
+        refresh_products_list()
+
+    def save_settings_click(e):
+        try:
+            new_rate = float((rate_field.value or "632").replace(",", "."))
         except Exception:
-            self.app.config_hour_rate = 632.0
-        self.app.op1 = self.in_op1.text.strip() or "Оператор 1"
-        self.app.op2 = self.in_op2.text.strip() or "Оператор 2"
-        self.app.op3 = self.in_op3.text.strip() or "Оператор 3"
-        self.app.op4 = self.in_op4.text.strip() or "Оператор 4"
-        self.app.config_theme = self.theme_spinner.text
-        self.app.config_font_size = int(self.font_slider.value)
-        self.app.cursor.execute('''
-            INSERT OR REPLACE INTO app_config (id, hour_rate, theme, font_size, op1, op2, op3, op4, pin_hash)
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?, (SELECT pin_hash FROM app_config WHERE id=1))
-        ''', (self.app.config_hour_rate, self.app.config_theme, self.app.config_font_size,
-              self.app.op1, self.app.op2, self.app.op3, self.app.op4))
-        self.app.conn.commit()
-        self.manager.current = 'main'
-
-
-class PinScreen(BackgroundScreen):
-    """Экран блокировки: создание PIN при первом запуске, ввод PIN при последующих."""
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.app = App.get_running_app()
-        self.mode = 'verify'
-        self.first_pin_temp = None
-
-        outer = FloatLayout(size_hint=(1, 1))
-        card = GlassPanel(orientation='vertical', padding=26, spacing=14,
-                           size_hint=(0.86, None), height=280,
-                           pos_hint={'center_x': 0.5, 'center_y': 0.55})
-
-        self.title_lbl = Label(text="Введите PIN-код", font_size='19sp', bold=True,
-                                color=get_color_from_hex("#c9a6ff"), size_hint_y=None, height=32)
-        card.add_widget(self.title_lbl)
-
-        self.hint_lbl = Label(text="", font_size='12sp', color=get_color_from_hex(TEXT_DIM),
-                               size_hint_y=None, height=20)
-        card.add_widget(self.hint_lbl)
-
-        self.pin_input = styled_field(TextInput, text="", password=True, multiline=False, halign='center',
-                                       input_filter='int', font_size='22sp', size_hint_y=None, height=52)
-        self.pin_input.bind(text=self.on_pin_text)
-        card.add_widget(self.pin_input)
-
-        self.error_lbl = Label(text="", color=get_color_from_hex(ACCENT_RED),
-                                font_size='12sp', size_hint_y=None, height=22)
-        card.add_widget(self.error_lbl)
-
-        self.btn_confirm = Button(text="Подтвердить", bold=True, size_hint_y=None, height=46,
-                                   background_normal='', background_color=get_color_from_hex(ACCENT_GREEN),
-                                   color=(0.08, 0.1, 0.08, 1))
-        self.btn_confirm.bind(on_press=self.on_confirm)
-        card.add_widget(self.btn_confirm)
-
-        outer.add_widget(card)
-        self.add_widget(outer)
-
-    def on_pin_text(self, instance, value):
-        if len(value) > 6:
-            self.pin_input.text = value[:6]
-
-    def on_enter(self):
-        self.error_lbl.text = ""
-        self.pin_input.text = ""
-        stored_hash = self.get_stored_hash()
-        if stored_hash:
-            self.mode = 'verify'
-            self.title_lbl.text = "Введите PIN-код"
-            self.hint_lbl.text = ""
-        else:
-            self.mode = 'setup_new'
-            self.first_pin_temp = None
-            self.title_lbl.text = "Придумайте PIN-код"
-            self.hint_lbl.text = "От 4 до 6 цифр"
-
-    def get_stored_hash(self):
-        self.app.cursor.execute("SELECT pin_hash FROM app_config WHERE id=1")
-        row = self.app.cursor.fetchone()
-        if row and row[0]:
-            return row[0]
-        return None
-
-    @staticmethod
-    def hash_pin(pin):
-        return hashlib.sha256(pin.encode('utf-8')).hexdigest()
-
-    def on_confirm(self, instance):
-        pin = self.pin_input.text.strip()
-        if len(pin) < 4:
-            self.error_lbl.text = "Минимум 4 цифры"
+            settings_error.value = "Некорректная ставка"
+            page.update()
             return
+        db.save_config(
+            new_rate, theme_dropdown.value or "Aurora Violet",
+            op1_field.value or "Оператор 1", op2_field.value or "Оператор 2",
+            op3_field.value or "Оператор 3", op4_field.value or "Оператор 4",
+        )
+        config.update(db.get_config())
+        pin_title.color = accent()
+        show_main_screen()
 
-        if self.mode == 'verify':
-            if self.hash_pin(pin) == self.get_stored_hash():
-                self.manager.current = 'main'
-            else:
-                self.error_lbl.text = "Неверный PIN-код"
-                self.pin_input.text = ""
+    def change_pin_click(e):
+        db.clear_pin_hash()
+        show_pin_screen()
 
-        elif self.mode == 'setup_new':
-            self.first_pin_temp = pin
-            self.mode = 'setup_confirm'
-            self.title_lbl.text = "Повторите PIN-код"
-            self.hint_lbl.text = ""
-            self.pin_input.text = ""
-            self.error_lbl.text = ""
+    def back_to_main_click(e):
+        show_main_screen()
 
-        elif self.mode == 'setup_confirm':
-            if pin == self.first_pin_temp:
-                self.save_pin(pin)
-                self.manager.current = 'main'
-            else:
-                self.error_lbl.text = "PIN-коды не совпадают, попробуйте снова"
-                self.mode = 'setup_new'
-                self.first_pin_temp = None
-                self.title_lbl.text = "Придумайте PIN-код"
-                self.hint_lbl.text = "От 4 до 6 цифр"
-                self.pin_input.text = ""
+    settings_view = ft.Stack(
+        expand=True,
+        controls=[
+            glowing_background(),
+            ft.Container(
+                expand=True, padding=14,
+                content=ft.Column([
+                    ft.Row([
+                        ft.IconButton(icon=ft.Icons.ARROW_BACK, icon_color="white", on_click=back_to_main_click),
+                        ft.Text("Настройки", size=18, weight=ft.FontWeight.BOLD, color="white"),
+                    ]),
+                    glass_card(ft.Column([rate_field], spacing=6)),
+                    glass_card(ft.Column([
+                        ft.Text("Имена четырёх сменных операторов", size=12, color="rgba(255,255,255,0.75)"),
+                        ft.Row([op1_field, op2_field]),
+                        ft.Row([op3_field, op4_field]),
+                    ], spacing=6)),
+                    glass_card(ft.Column([theme_dropdown], spacing=6)),
+                    glass_card(ft.Column([
+                        ft.Text("Каталог продукции", size=12, color="rgba(255,255,255,0.75)"),
+                        ft.Row([new_product_input, ft.FloatingActionButton(icon=ft.Icons.ADD, on_click=add_product_click, mini=True)]),
+                        ft.Divider(),
+                        products_list_view,
+                    ], spacing=6)),
+                    settings_error,
+                    ft.OutlinedButton("Сменить PIN-код", on_click=change_pin_click, width=300),
+                    ft.ElevatedButton("Сохранить", on_click=save_settings_click, width=300),
+                ], scroll=ft.ScrollMode.ALWAYS, spacing=14)
+            ),
+        ],
+    )
 
-    def save_pin(self, pin):
-        pin_hash = self.hash_pin(pin)
-        self.app.cursor.execute("SELECT id FROM app_config WHERE id=1")
-        exists = self.app.cursor.fetchone()
-        if exists:
-            self.app.cursor.execute("UPDATE app_config SET pin_hash=? WHERE id=1", (pin_hash,))
-        else:
-            self.app.cursor.execute("INSERT INTO app_config (id, pin_hash) VALUES (1, ?)", (pin_hash,))
-        self.app.conn.commit()
+    def show_settings_screen():
+        open_settings_fields()
+        root.content = settings_view
+        page.navigation_bar = None
+        page.update()
 
-
-class ShiftTrackerApp(App):
-    def build(self):
-        self.config_hour_rate = 632.0
-        self.config_theme = "Aurora Violet"
-        self.config_font_size = 13
-        self.op1, self.op2, self.op3, self.op4 = "Оператор 1", "Оператор 2", "Оператор 3", "Оператор 4"
-        self.init_db()
-        sm = ScreenManager()
-        sm.add_widget(PinScreen(name='pin'))
-        sm.add_widget(MainScreen(name='main'))
-        sm.add_widget(SettingsScreen(name='settings'))
-        sm.current = 'pin'
-        return sm
-
-    def init_db(self):
-        db_path = os.path.join(self.user_data_dir, "smart_hours.db")
-        self.conn = sqlite3.connect(db_path)
-        self.cursor = self.conn.cursor()
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS calendar_days (
-                month TEXT, day INTEGER, status TEXT, value_data TEXT,
-                partner_name TEXT, production_type TEXT, production_kg TEXT,
-                work_start_time TEXT, breaks_json TEXT, shift_operator TEXT,
-                PRIMARY KEY (month, day)
-            )
-        ''')
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS app_config (
-                id INTEGER PRIMARY KEY, hour_rate REAL, theme TEXT, font_size INTEGER,
-                op1 TEXT, op2 TEXT, op3 TEXT, op4 TEXT, pin_hash TEXT
-            )
-        ''')
-        try:
-            self.cursor.execute("ALTER TABLE app_config ADD COLUMN pin_hash TEXT")
-            self.conn.commit()
-        except sqlite3.OperationalError:
-            pass
-        self.cursor.execute('CREATE TABLE IF NOT EXISTS production_types (type_name TEXT PRIMARY KEY)')
-        self.conn.commit()
-        self.cursor.execute("SELECT hour_rate, theme, font_size, op1, op2, op3, op4 FROM app_config WHERE id=1")
-        row = self.cursor.fetchone()
-        if row:
-            self.config_hour_rate = row[0] or 632.0
-            self.config_theme = row[1] or "Aurora Violet"
-            self.config_font_size = row[2] or 13
-            self.op1, self.op2, self.op3, self.op4 = (row[3] or "Оператор 1", row[4] or "Оператор 2",
-                                                        row[5] or "Оператор 3", row[6] or "Оператор 4")
+    # ---------- старт ----------
+    page.add(root)
+    show_pin_screen()
 
 
-if __name__ == '__main__':
-    ShiftTrackerApp().run()
+ft.run(main)
