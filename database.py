@@ -8,7 +8,10 @@ from datetime import datetime
 # ==========================================
 class DBManager:
     def __init__(self):
-        db_dir = os.getenv("FLET_APP_DATA_DIR", ".")
+        # На Android рабочая директория недоступна для записи.
+        # Flet передаёт путь к хранилищу приложения в FLET_APP_STORAGE_DATA.
+        db_dir = os.getenv("FLET_APP_STORAGE_DATA") or "."
+        os.makedirs(db_dir, exist_ok=True)
         db_path = os.path.join(db_dir, "shifts_pro.db")
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.create_tables()
