@@ -358,7 +358,7 @@ def main(page: ft.Page):
         controls=[
             glowing_background(),
             ft.Container(
-                alignment=ft.alignment.center,
+                alignment=ft.Alignment.CENTER,
                 expand=True,
                 content=glass_card(
                     ft.Column(
@@ -393,7 +393,7 @@ def main(page: ft.Page):
         grid_container.controls.clear()
         days_header = ft.Row([
             ft.Container(ft.Text(d, color="rgba(255,255,255,0.5)", size=12, weight=ft.FontWeight.BOLD),
-                         expand=1, alignment=ft.alignment.center)
+                         expand=1, alignment=ft.Alignment.CENTER)
             for d in ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
         ], spacing=5)
         grid_container.controls.append(days_header)
@@ -575,9 +575,9 @@ def main(page: ft.Page):
         ft.Text("ДИАГРАММЫ АНАЛИТИКИ ЗА МЕСЯЦ", size=14, weight=ft.FontWeight.BOLD, color="white"),
         glass_card(ft.Column([
             ft.Text("1. Время прибытия (вовремя / буфер / опоздание):", size=11, color="rgba(255,255,255,0.8)"),
-            ft.Container(chart_arrival, height=120, alignment=ft.alignment.center),
+            ft.Container(chart_arrival, height=120, alignment=ft.Alignment.CENTER),
             ft.Text("2. Выработка продукции (норма 2100 кг / недовыработка):", size=11, color="rgba(255,255,255,0.8)"),
-            ft.Container(chart_weight, height=120, alignment=ft.alignment.center),
+            ft.Container(chart_weight, height=120, alignment=ft.Alignment.CENTER),
         ])),
     ], scroll=ft.ScrollMode.ALWAYS, expand=True)
 
