@@ -247,7 +247,7 @@ def main(page: ft.Page):
                 ft.Container(
                     expand=True,
                     gradient=ft.LinearGradient(
-                        begin=ft.Alignment.TOP_LEFT, end=ft.alignment.bottom_right,
+                        begin=ft.Alignment.TOP_LEFT, end=ft.Alignment.BOTTOM_RIGHT,
                         colors=["#150e34", "#241a5c", "#123a66"]
                     ),
                 ),
