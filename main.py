@@ -270,7 +270,7 @@ def main(page: ft.Page):
         params = dict(
             content=content_column,
             bgcolor="#1affffff",
-            border=ft.border.all(1, "#26ffffff"),
+            border=ft.Border.all(1, "#26ffffff"),
             border_radius=18,
             blur=ft.Blur(24, 24),
             padding=16,
@@ -439,7 +439,7 @@ def main(page: ft.Page):
                             ft.Text(op_name.split()[-1], size=9, color="rgba(255,255,255,0.45)")
                         ], alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=1),
                         expand=1, height=52, bgcolor=bg_color,
-                        border=ft.border.all(1, border_color), border_radius=10,
+                        border=ft.Border.all(1, border_color), border_radius=10,
                         on_click=on_day_click
                     )
                     row_days.append(cell)
@@ -493,10 +493,15 @@ def main(page: ft.Page):
                                                     color="white", size=12))
             page.update()
 
-        def save_and_close(e):
+def save_and_close(e):
             arrival_value = ARRIVAL_OPTIONS[arrival_seg.selected_index]
+            try:
+                weight_value = float((weight_input.value or "0").replace(",", ".").strip())
+            except ValueError:
+                page.open(ft.SnackBar(ft.Text("Вес продукции: введите число, например 2100")))
+                return
             db.save_shift(date_str, float(hours_slider.value), status_dropdown.value,
-                          product_dropdown.value, float(weight_input.value or 0), arrival_value)
+                          product_dropdown.value, weight_value, arrival_value)
             update_global_dashboard()
             build_calendar_grid()
             refresh_analytics_tab()
