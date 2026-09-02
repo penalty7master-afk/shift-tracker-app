@@ -13,9 +13,10 @@ def calculate_salary_and_premium(year, month, hour_rate):
     total_hours = 0.0
     real_work_smen_count = 0
 
-    for date_str, shift in current_data.items():
+    for shift in current_data.values():
         if shift["status"] == "Рабочая смена":
-            total_hours += shift["hours"] or 0
+            hours = shift["hours"]
+            total_hours += hours if hours is not None else 0.0
             real_work_smen_count += 1
         # "Выходной для премии" сознательно НЕ учитывается ни в часах, ни в
         # счётчике смен — это просто информационная отметка в календаре.
@@ -50,10 +51,9 @@ def calculate_salary_and_premium(year, month, hour_rate):
 def get_operator_for_date(date_obj, op_names):
     base_date = datetime(2026, 9, 1).date()
     delta_days = (date_obj - base_date).days
-    operator_index = delta_days % 4
-    if operator_index < 0:
-        operator_index += 4
-    return op_names[operator_index]
+    # В Python остаток от деления на положительное число всегда неотрицательный,
+    # поэтому даты до base_date обрабатываются корректно.
+    return op_names[delta_days % 4]
 
 
 def hours_for_arrival(arrival_value):
