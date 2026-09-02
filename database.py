@@ -55,7 +55,8 @@ class DBManager:
         cursor = self.conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM products")
         if cursor.fetchone()[0] == 0:
-            cursor.executemany("INSERT INTO products VALUES (?)", [("Продукт 1",), ("Продукт 2",), ("Продукт 3",)])
+            cursor.executemany("INSERT INTO products VALUES (?)",
+                               [("Продукт 1",), ("Продукт 2",), ("Продукт 3",)])
             self.conn.commit()
 
     def init_default_config(self):
@@ -114,14 +115,17 @@ class DBManager:
     def get_month_data(self, year, month):
         cursor = self.conn.cursor()
         prefix = f"{year}-{month:02d}%"
-        cursor.execute("SELECT date, hours, status, product, weight, arrival_status FROM shifts WHERE date LIKE ?", (prefix,))
+        cursor.execute("SELECT date, hours, status, product, weight, arrival_status "
+                       "FROM shifts WHERE date LIKE ?", (prefix,))
         rows = cursor.fetchall()
-        return {r[0]: {"hours": r[1], "status": r[2], "product": r[3], "weight": r[4], "arrival_status": r[5]} for r in rows}
+        return {r[0]: {"hours": r[1], "status": r[2], "product": r[3],
+                       "weight": r[4], "arrival_status": r[5]} for r in rows}
 
     def add_timeline_event(self, date_str, event_type):
         cursor = self.conn.cursor()
         now_str = datetime.now().strftime("%H:%M:%S")
-        cursor.execute("INSERT INTO timeline (date, event_time, event_type) VALUES (?, ?, ?)", (date_str, now_str, event_type))
+        cursor.execute("INSERT INTO timeline (date, event_time, event_type) VALUES (?, ?, ?)",
+                       (date_str, now_str, event_type))
         self.conn.commit()
 
     def get_timeline(self, date_str):
