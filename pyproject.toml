@@ -1,0 +1,17 @@
+[project]
+name = "shifts_pro"
+version = "1.0.0"
+description = "Календарь смен PRO"
+requires-python = ">=3.12"
+dependencies = [
+    "flet==0.86.5",
+    "flet-charts==0.86.5",
+]
+
+[tool.flet]
+org = "com.penalty7master"
+product = "Календарь смен PRO"
+company = "penalty7master"
+
+[tool.flet.app]
+module = "main"
