@@ -24,6 +24,14 @@ def main(page: ft.Page):
     view = {"year": _now.year, "month": _now.month}
     config = db.get_config()
 
+    def bind_event(control, handler, *names):
+        """Имена событий отличаются между версиями Flet — привязываем безопасно."""
+        for attr in names:
+            if hasattr(control, attr):
+                setattr(control, attr, handler)
+                return True
+        return False
+
     def accent():
         return THEME_ACCENTS.get(config["theme"], THEME_ACCENTS["Aurora Violet"])
 
@@ -365,8 +373,8 @@ def main(page: ft.Page):
 
         weight_input = ft.TextField(label="Выработка продукции (кг)",
                                      value=str(current_shift.get("weight", WEIGHT_NORM)),
-                                     keyboard_type=ft.KeyboardType.NUMBER,
-                                     on_change=sync_value)
+                                     keyboard_type=ft.KeyboardType.NUMBER)
+        weight_input.on_change = sync_value
 
         products = db.get_products()
         saved_product = current_shift.get("product")
@@ -616,29 +624,27 @@ def main(page: ft.Page):
     op3_field = ft.TextField(label="Оператор 3", expand=True, bgcolor="#14ffffff", color="white", border_color="#33ffffff")
     op4_field = ft.TextField(label="Оператор 4", expand=True, bgcolor="#14ffffff", color="white", border_color="#33ffffff")
 
-    def on_accent_change(e):
-        # мгновенный предпросмотр; в БД значение уходит по "Сохранить" или "Назад"
-        config["theme"] = e.data or config["theme"]
-        theme_dropdown.value = config["theme"]
-        apply_accent()
-        page.update()
-
-    def on_bg_change(e):
-        config["bg_theme"] = e.data or config["bg_theme"]
-        bg_dropdown.value = config["bg_theme"]
-        apply_accent()
-        page.update()
-
     theme_dropdown = ft.Dropdown(
         label="Акцентный цвет",
-        on_change=on_accent_change,
         options=[ft.dropdown.Option(name) for name in THEME_ACCENTS.keys()]
     )
     bg_dropdown = ft.Dropdown(
         label="Фон / тональность",
-        on_change=on_bg_change,
         options=[ft.dropdown.Option(name) for name in THEME_BACKGROUNDS.keys()]
     )
+
+    def preview_theme(e=None):
+        # мгновенный предпросмотр; в БД значения уходят по "Сохранить" или "Назад"
+        config["theme"] = theme_dropdown.value or config["theme"]
+        config["bg_theme"] = bg_dropdown.value or config["bg_theme"]
+        apply_accent()
+        page.update()
+
+    # В разных сборках Flet у Dropdown событие называется по-разному, а в конструктор
+    # его передавать нельзя — привязываем после создания, если атрибут есть.
+    bind_event(theme_dropdown, preview_theme, "on_change", "on_select", "on_changed")
+    bind_event(bg_dropdown, preview_theme, "on_change", "on_select", "on_changed")
+
     settings_error = ft.Text("", color="#fca5a5", size=12)
 
     new_product_input = ft.TextField(label="Название нового продукта", expand=True,
@@ -742,7 +748,12 @@ def main(page: ft.Page):
                         ft.Row([op1_field, op2_field]),
                         ft.Row([op3_field, op4_field]),
                     ], spacing=6)),
-                    glass_card(ft.Column([theme_dropdown, bg_dropdown], spacing=10)),
+                    glass_card(ft.Column([
+                        theme_dropdown,
+                        bg_dropdown,
+                        # запасной путь, если Dropdown в этой сборке не отдаёт событие выбора
+                        ft.OutlinedButton("Применить тему", on_click=preview_theme, width=300),
+                    ], spacing=10)),
                     glass_card(ft.Column([
                         ft.Text("Каталог продукции", size=12, color="#bfffffff"),
                         ft.Row([new_product_input,
