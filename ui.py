@@ -4,7 +4,7 @@ import hashlib
 from datetime import datetime
 import calendar
 
-from constants import THEME_ACCENTS, ARRIVAL_OPTIONS, MONTH_NAMES, WEIGHT_NORM
+from constants import THEME_ACCENTS, ARRIVAL_OPTIONS, ARRIVAL_LABELS, MONTH_NAMES, WEIGHT_NORM
 from database import db
 from calculations import calculate_salary_and_premium, get_operator_for_date, hours_for_arrival
 
@@ -26,12 +26,20 @@ def main(page: ft.Page):
     def accent():
         return THEME_ACCENTS.get(config["theme"], THEME_ACCENTS["Aurora Violet"])
 
+    def accent_a(alpha_hex):
+        """Акцент с заданной прозрачностью: accent_a('40') -> '#40c9a6ff'."""
+        return f"#{alpha_hex}{accent().lstrip('#')}"
+
     def op_names():
         return [config["op1"], config["op2"], config["op3"], config["op4"]]
 
     def short_op(name):
         parts = (name or "").split()
         return parts[-1] if parts else "—"
+
+    def sync_value(e):
+        # Flet не всегда пишет ввод в .value до потери фокуса — синхронизируем вручную
+        e.control.value = e.data
 
     # ---------- фон: градиент + светящиеся сферы + реальный блюр стекла ----------
     def glowing_background():
@@ -107,6 +115,7 @@ def main(page: ft.Page):
         max_length=6, text_align=ft.TextAlign.CENTER, width=200, autofocus=True,
         border_color="#33ffffff", bgcolor="#14ffffff", color="white",
     )
+    pin_field.on_change = sync_value
     pin_error = ft.Text("", color="#fca5a5", size=12)
 
     def hash_pin(pin):
@@ -115,6 +124,7 @@ def main(page: ft.Page):
     def show_pin_screen(force_setup=False):
         cfg = db.get_config()
         config["pin_hash"] = cfg["pin_hash"]
+        apply_accent()
         pin_field.value = ""
         pin_error.value = ""
         if cfg["pin_hash"] and not force_setup:
@@ -236,15 +246,18 @@ def main(page: ft.Page):
                 else:
                     d_obj = datetime(year, month, day).date()
                     d_str = d_obj.strftime("%Y-%m-%d")
-                    op_name = get_operator_for_date(d_obj, op_names())
+                    saved = month_data.get(d_str)
+                    # ручная подмена оператора приоритетнее графика 4/4
+                    op_name = (saved or {}).get("operator") or get_operator_for_date(d_obj, op_names())
 
                     bg_color = "transparent"
                     border_color = "#24ffffff"
 
-                    if d_str in month_data:
-                        status = month_data[d_str]["status"]
+                    if saved:
+                        status = saved["status"]
                         if status == "Рабочая смена":
-                            bg_color = "#1affffff"
+                            bg_color = accent_a("26")
+                            border_color = accent_a("99")
                         elif status == "Выходной для премии":
                             bg_color = "#404caf50"
                             border_color = "#994caf50"
@@ -275,15 +288,25 @@ def main(page: ft.Page):
     def show_day_details_modal(date_obj):
         date_str = date_obj.strftime("%Y-%m-%d")
         month_data = db.get_month_data(date_obj.year, date_obj.month)
+        default_op = get_operator_for_date(date_obj, op_names())
         current_shift = month_data.get(date_str, {
             "hours": 11.0, "status": "Рабочая смена", "product": "Продукт 1",
-            "weight": WEIGHT_NORM, "arrival_status": ARRIVAL_OPTIONS[0]
+            "weight": WEIGHT_NORM, "arrival_status": ARRIVAL_OPTIONS[0], "operator": None
         })
 
         status_dropdown = ft.Dropdown(
             label="Статус дня", value=current_shift["status"],
             options=[ft.dropdown.Option("Рабочая смена"), ft.dropdown.Option("Выходной для премии"),
                      ft.dropdown.Option("Обычный выходной"), ft.dropdown.Option("Проспал")]
+        )
+
+        ops = op_names()
+        saved_op = current_shift.get("operator") or default_op
+        if saved_op not in ops:
+            saved_op = default_op
+        operator_dropdown = ft.Dropdown(
+            label="Оператор смены (подмена)", value=saved_op,
+            options=[ft.dropdown.Option(o) for o in ops]
         )
 
         # 0 часов — валидное значение, поэтому проверяем именно на None
@@ -299,6 +322,20 @@ def main(page: ft.Page):
         except ValueError:
             arrival_index = 0
 
+        def arrival_label(idx):
+            title, sub = ARRIVAL_LABELS[idx]
+            return ft.Container(
+                width=92,
+                alignment=ft.Alignment.CENTER,
+                padding=ft.Padding.symmetric(vertical=4, horizontal=2),
+                content=ft.Column([
+                    ft.Text(title, size=11, color="white", text_align=ft.TextAlign.CENTER),
+                    ft.Text(sub, size=9, color="#b3ffffff", text_align=ft.TextAlign.CENTER),
+                ], spacing=0, tight=True,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            )
+
         def on_arrival_change(e):
             # свойство selected_index может быть ещё не синхронизировано — берём из события
             try:
@@ -313,12 +350,13 @@ def main(page: ft.Page):
             selected_index=arrival_index,
             thumb_color=accent(),
             on_change=on_arrival_change,
-            controls=[ft.Text(opt, size=11) for opt in ARRIVAL_OPTIONS],
+            controls=[arrival_label(i) for i in range(len(ARRIVAL_OPTIONS))],
         )
 
         weight_input = ft.TextField(label="Выработка продукции (кг)",
                                      value=str(current_shift.get("weight", WEIGHT_NORM)),
-                                     keyboard_type=ft.KeyboardType.NUMBER)
+                                     keyboard_type=ft.KeyboardType.NUMBER,
+                                     on_change=sync_value)
 
         products = db.get_products()
         saved_product = current_shift.get("product")
@@ -327,14 +365,22 @@ def main(page: ft.Page):
         product_dropdown = ft.Dropdown(label="Тип продукта", value=saved_product,
                                         options=[ft.dropdown.Option(p) for p in products])
 
-        timeline_list = ft.Column()
-        for t_time, t_type in db.get_timeline(date_str):
-            timeline_list.controls.append(ft.Text(f"• {t_time} -> {t_type}", color="white", size=12))
+        # События трекера копятся в памяти и попадают в БД только по "Сохранить"
+        saved_events = list(db.get_timeline(date_str))
+        pending_events = []
+        timeline_list = ft.Column(spacing=2)
+
+        def refresh_timeline():
+            timeline_list.controls = [
+                ft.Text(f"• {t_time} -> {t_type}", color="white", size=12)
+                for t_time, t_type in saved_events + pending_events
+            ]
+
+        refresh_timeline()
 
         def add_event(e, etype):
-            db.add_timeline_event(date_str, etype)
-            timeline_list.controls.append(ft.Text(f"• {datetime.now().strftime('%H:%M:%S')} -> {etype}",
-                                                    color="white", size=12))
+            pending_events.append((datetime.now().strftime("%H:%M:%S"), etype))
+            refresh_timeline()
             page.update()
 
         def save_and_close(e):
@@ -348,7 +394,10 @@ def main(page: ft.Page):
                 return
             weight_input.error_text = None
             db.save_shift(date_str, float(hours_slider.value), status_dropdown.value,
-                          product_dropdown.value, weight_value, arrival_value)
+                          product_dropdown.value, weight_value, arrival_value,
+                          operator_dropdown.value)
+            for t_time, t_type in pending_events:
+                db.add_timeline_event(date_str, t_type, t_time)
             update_global_dashboard()
             build_calendar_grid()
             refresh_analytics_tab()
@@ -358,18 +407,22 @@ def main(page: ft.Page):
             modal=True,
             title=ft.Text(f"Смена: {date_obj.strftime('%d.%m.%Y')}", color="white"),
             content=ft.Container(
+                # верхний отступ, чтобы плавающая подпись "Статус дня" не обрезалась при скролле
+                padding=ft.Padding.only(top=12, left=4, right=4),
                 content=ft.Column([
                     status_dropdown,
+                    operator_dropdown,
                     ft.Text("Время прибытия:", size=11, color="#99ffffff"),
-                    arrival_seg,
+                    ft.Row([arrival_seg], alignment=ft.MainAxisAlignment.CENTER),
                     ft.Text("Корректировка часов (ручная):", size=11, color="#99ffffff"),
                     hours_slider, product_dropdown, weight_input, ft.Divider(),
                     ft.Text("Трекер ночи (хронология):", size=12, weight=ft.FontWeight.BOLD),
                     ft.Row([
                         ft.ElevatedButton("+ Перекур", on_click=lambda e: add_event(e, "Перекур")),
                         ft.ElevatedButton("▶ Работа", on_click=lambda e: add_event(e, "Работа")),
-                    ]), timeline_list
-                ], scroll=ft.ScrollMode.ALWAYS, spacing=10), width=400, height=520
+                    ], alignment=ft.MainAxisAlignment.CENTER),
+                    timeline_list
+                ], scroll=ft.ScrollMode.AUTO, spacing=10), width=340, height=520
             ),
             actions=[
                 ft.TextButton("Отмена", on_click=lambda e: close_dialog(dialog)),
@@ -484,6 +537,16 @@ def main(page: ft.Page):
 
     settings_button = ft.IconButton(icon=ft.Icons.SETTINGS, icon_color="white", on_click=go_to_settings)
 
+    def apply_accent():
+        """Единая точка применения акцентного цвета ко всем экранам."""
+        c = accent()
+        page.theme = ft.Theme(color_scheme_seed=c)
+        pin_title.color = c
+        salary_text.color = c
+        month_label.color = c
+        settings_button.icon_color = c
+        nav_bar.indicator_color = accent_a("40")
+
     main_layout = ft.Stack(
         expand=True,
         controls=[
@@ -510,6 +573,7 @@ def main(page: ft.Page):
     )
 
     def show_main_screen():
+        apply_accent()
         root.content = main_layout
         page.navigation_bar = nav_bar
         build_calendar_grid()
@@ -534,6 +598,9 @@ def main(page: ft.Page):
     new_product_input = ft.TextField(label="Название нового продукта", expand=True,
                                       bgcolor="#14ffffff", color="white", border_color="#33ffffff")
     products_list_view = ft.Column()
+
+    for _f in (rate_field, op1_field, op2_field, op3_field, op4_field, new_product_input):
+        _f.on_change = sync_value
 
     def refresh_products_list():
         products_list_view.controls.clear()
@@ -573,33 +640,42 @@ def main(page: ft.Page):
         new_product_input.error_text = None
         refresh_products_list()
 
-    def save_settings_click(e):
+    def clean_op(value, default):
+        value = (value or "").strip()
+        return value if value else default
+
+    def read_rate():
         try:
-            new_rate = float((rate_field.value or "632").replace(",", "."))
-        except Exception:
-            settings_error.value = "Некорректная ставка"
-            page.update()
-            return
+            return float((rate_field.value or "632").replace(",", "."))
+        except ValueError:
+            return None
 
-        def clean_op(value, default):
-            value = (value or "").strip()
-            return value if value else default
-
+    def persist_settings(new_rate):
         db.save_config(
             new_rate, theme_dropdown.value or "Aurora Violet",
             clean_op(op1_field.value, "Оператор 1"), clean_op(op2_field.value, "Оператор 2"),
             clean_op(op3_field.value, "Оператор 3"), clean_op(op4_field.value, "Оператор 4"),
         )
         config.update(db.get_config())
-        pin_title.color = accent()
+
+    def save_settings_click(e):
+        new_rate = read_rate()
+        if new_rate is None:
+            settings_error.value = "Некорректная ставка"
+            page.update()
+            return
+        persist_settings(new_rate)
+        show_main_screen()
+
+    def back_to_main_click(e):
+        # "Назад" тоже сохраняет; при некорректной ставке остаётся прежняя
+        new_rate = read_rate()
+        persist_settings(config["hour_rate"] if new_rate is None else new_rate)
         show_main_screen()
 
     def change_pin_click(e):
         # PIN не стираем заранее: старый хеш живёт до успешного подтверждения нового
         show_pin_screen(force_setup=True)
-
-    def back_to_main_click(e):
-        show_main_screen()
 
     settings_view = ft.Stack(
         expand=True,
