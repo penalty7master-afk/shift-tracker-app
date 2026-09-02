@@ -15,6 +15,7 @@ class DBManager:
         db_path = os.path.join(db_dir, "shifts_pro.db")
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.create_tables()
+        self.migrate()
         self.init_default_products()
         self.init_default_config()
 
@@ -27,7 +28,8 @@ class DBManager:
                 status TEXT,
                 product TEXT,
                 weight REAL,
-                arrival_status TEXT
+                arrival_status TEXT,
+                operator TEXT
             )
         """)
         cursor.execute("""
@@ -53,6 +55,14 @@ class DBManager:
             )
         """)
         self.conn.commit()
+
+    def migrate(self):
+        """Добавляет новые колонки в уже созданные ранее БД."""
+        cursor = self.conn.cursor()
+        cols = [r[1] for r in cursor.execute("PRAGMA table_info(shifts)").fetchall()]
+        if "operator" not in cols:
+            cursor.execute("ALTER TABLE shifts ADD COLUMN operator TEXT")
+            self.conn.commit()
 
     def init_default_products(self):
         cursor = self.conn.cursor()
@@ -101,32 +111,33 @@ class DBManager:
     def clear_pin_hash(self):
         self.save_pin_hash(None)
 
-    def save_shift(self, date_str, hours, status, product, weight, arrival_status):
+    def save_shift(self, date_str, hours, status, product, weight, arrival_status, operator=None):
         cursor = self.conn.cursor()
         cursor.execute("""
-            INSERT INTO shifts (date, hours, status, product, weight, arrival_status)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO shifts (date, hours, status, product, weight, arrival_status, operator)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(date) DO UPDATE SET
                 hours=excluded.hours,
                 status=excluded.status,
                 product=excluded.product,
                 weight=excluded.weight,
-                arrival_status=excluded.arrival_status
-        """, (date_str, hours, status, product, weight, arrival_status))
+                arrival_status=excluded.arrival_status,
+                operator=excluded.operator
+        """, (date_str, hours, status, product, weight, arrival_status, operator))
         self.conn.commit()
 
     def get_month_data(self, year, month):
         cursor = self.conn.cursor()
         prefix = f"{year}-{month:02d}%"
-        cursor.execute("SELECT date, hours, status, product, weight, arrival_status "
+        cursor.execute("SELECT date, hours, status, product, weight, arrival_status, operator "
                        "FROM shifts WHERE date LIKE ?", (prefix,))
         rows = cursor.fetchall()
         return {r[0]: {"hours": r[1], "status": r[2], "product": r[3],
-                       "weight": r[4], "arrival_status": r[5]} for r in rows}
+                       "weight": r[4], "arrival_status": r[5], "operator": r[6]} for r in rows}
 
-    def add_timeline_event(self, date_str, event_type):
+    def add_timeline_event(self, date_str, event_type, event_time=None):
         cursor = self.conn.cursor()
-        now_str = datetime.now().strftime("%H:%M:%S")
+        now_str = event_time or datetime.now().strftime("%H:%M:%S")
         cursor.execute("INSERT INTO timeline (date, event_time, event_type) VALUES (?, ?, ?)",
                        (date_str, now_str, event_type))
         self.conn.commit()
