@@ -1,4 +1,5 @@
 import flet as ft
+import flet_charts as fch
 import hashlib
 from datetime import datetime
 import calendar
@@ -377,8 +378,15 @@ def main(page: ft.Page):
         )
         open_dialog(dialog)
 
-    chart_arrival = ft.PieChart(sections=[], sections_space=2, center_space_radius=20, expand=True)
-    chart_weight = ft.PieChart(sections=[], sections_space=2, center_space_radius=20, expand=True)
+    # В flet 0.86 диаграммы живут в отдельном пакете flet-charts (import flet_charts as fch)
+    chart_arrival = fch.PieChart(sections=[], sections_space=2, center_space_radius=20, expand=True)
+    chart_weight = fch.PieChart(sections=[], sections_space=2, center_space_radius=20, expand=True)
+
+    TITLE_STYLE = ft.TextStyle(size=10, color="white", weight=ft.FontWeight.BOLD)
+
+    def pie_section(value, color, title):
+        return fch.PieChartSection(value=value, color=color, radius=26,
+                                   title=title, title_style=TITLE_STYLE)
 
     def refresh_analytics_tab():
         month_data = db.get_month_data(view["year"], view["month"])
@@ -403,21 +411,21 @@ def main(page: ft.Page):
         total_arr = vv + bf + op
         if total_arr > 0:
             chart_arrival.sections = [
-                ft.PieChartSection(vv, color="green", title=f"В-{int(vv/total_arr*100)}%", radius=20),
-                ft.PieChartSection(bf, color="orange", title=f"Б-{int(bf/total_arr*100)}%", radius=20),
-                ft.PieChartSection(op, color="red", title=f"О-{int(op/total_arr*100)}%", radius=20),
+                pie_section(vv, "#6ee7b7", f"В {int(vv / total_arr * 100)}%"),
+                pie_section(bf, "#fbbf24", f"Б {int(bf / total_arr * 100)}%"),
+                pie_section(op, "#f87171", f"О {int(op / total_arr * 100)}%"),
             ]
         else:
-            chart_arrival.sections = [ft.PieChartSection(1, color="grey", title="Нет данных", radius=20)]
+            chart_arrival.sections = [pie_section(1, "#4dffffff", "Нет данных")]
 
         total_w = norm_ok + norm_fail
         if total_w > 0:
             chart_weight.sections = [
-                ft.PieChartSection(norm_ok, color="green", title=f"Норма-{int(norm_ok/total_w*100)}%", radius=20),
-                ft.PieChartSection(norm_fail, color="red", title=f"Недо-{int(norm_fail/total_w*100)}%", radius=20),
+                pie_section(norm_ok, "#6ee7b7", f"Норма {int(norm_ok / total_w * 100)}%"),
+                pie_section(norm_fail, "#f87171", f"Недо {int(norm_fail / total_w * 100)}%"),
             ]
         else:
-            chart_weight.sections = [ft.PieChartSection(1, color="grey", title="Нет данных", radius=20)]
+            chart_weight.sections = [pie_section(1, "#4dffffff", "Нет данных")]
         page.update()
 
     def shift_month(delta):
@@ -444,10 +452,10 @@ def main(page: ft.Page):
         ft.Text("ДИАГРАММЫ АНАЛИТИКИ ЗА МЕСЯЦ", size=14, weight=ft.FontWeight.BOLD, color="white"),
         glass_card(ft.Column([
             ft.Text("1. Время прибытия (вовремя / буфер / опоздание):", size=11, color="#ccffffff"),
-            ft.Container(chart_arrival, height=120, alignment=ft.Alignment.CENTER),
+            ft.Container(chart_arrival, height=140, alignment=ft.Alignment.CENTER),
             ft.Text(f"2. Выработка продукции (норма {int(WEIGHT_NORM)} кг / недовыработка):",
                     size=11, color="#ccffffff"),
-            ft.Container(chart_weight, height=120, alignment=ft.Alignment.CENTER),
+            ft.Container(chart_weight, height=140, alignment=ft.Alignment.CENTER),
         ])),
     ], scroll=ft.ScrollMode.ALWAYS, expand=True)
 
