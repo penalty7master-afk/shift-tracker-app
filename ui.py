@@ -340,36 +340,41 @@ def main(page: ft.Page):
         except ValueError:
             arrival_index = 0
 
-        def arrival_label(idx):
-            title, sub = ARRIVAL_LABELS[idx]
-            return ft.Container(
-                width=92,
+        # ---------- переключатель времени прибытия (3 сегмента, всегда по ширине) ----------
+        arrival_state = {"idx": arrival_index}
+        arrival_cells = []
+
+        def paint_arrival():
+            for i, cell in enumerate(arrival_cells):
+                on = i == arrival_state["idx"]
+                cell.bgcolor = accent() if on else "transparent"
+                cell.content.controls[0].color = "#101014" if on else "white"
+                cell.content.controls[1].color = "#cc101014" if on else "#b3ffffff"
+
+        def select_arrival(idx):
+            arrival_state["idx"] = idx
+            hours_slider.value = hours_for_arrival(ARRIVAL_OPTIONS[idx])
+            paint_arrival()
+            page.update()
+
+        for _i, (_title, _sub) in enumerate(ARRIVAL_LABELS):
+            arrival_cells.append(ft.Container(
+                expand=1, height=42, border_radius=9, padding=2,
                 alignment=ft.Alignment.CENTER,
-                padding=ft.Padding.symmetric(vertical=4, horizontal=2),
                 content=ft.Column([
-                    ft.Text(title, size=11, color="white", text_align=ft.TextAlign.CENTER),
-                    ft.Text(sub, size=9, color="#b3ffffff", text_align=ft.TextAlign.CENTER),
+                    ft.Text(_title, size=11, text_align=ft.TextAlign.CENTER),
+                    ft.Text(_sub, size=9, text_align=ft.TextAlign.CENTER),
                 ], spacing=0, tight=True,
                     alignment=ft.MainAxisAlignment.CENTER,
                     horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-            )
+                on_click=lambda e, n=_i: select_arrival(n),
+            ))
 
-        def on_arrival_change(e):
-            # свойство selected_index может быть ещё не синхронизировано — берём из события
-            try:
-                idx = int(e.data)
-            except (TypeError, ValueError):
-                idx = arrival_seg.selected_index or 0
-            arrival_seg.selected_index = idx
-            hours_slider.value = hours_for_arrival(ARRIVAL_OPTIONS[idx])
-            page.update()
-
-        arrival_seg = ft.CupertinoSlidingSegmentedButton(
-            selected_index=arrival_index,
-            thumb_color=accent(),
-            on_change=on_arrival_change,
-            controls=[arrival_label(i) for i in range(len(ARRIVAL_OPTIONS))],
+        arrival_row = ft.Container(
+            bgcolor="#14ffffff", border_radius=11, padding=3,
+            content=ft.Row(arrival_cells, spacing=3),
         )
+        paint_arrival()
 
         weight_input = ft.TextField(label="Выработка продукции (кг)",
                                      value=str(current_shift.get("weight", WEIGHT_NORM)),
@@ -402,7 +407,7 @@ def main(page: ft.Page):
             page.update()
 
         def save_and_close(e):
-            arrival_value = ARRIVAL_OPTIONS[arrival_seg.selected_index or 0]
+            arrival_value = ARRIVAL_OPTIONS[arrival_state["idx"]]
             try:
                 weight_value = float((weight_input.value or "0").replace(",", ".").strip())
             except ValueError:
@@ -421,26 +426,34 @@ def main(page: ft.Page):
             refresh_analytics_tab()
             close_dialog(dialog)
 
+        # Шапка вне скролла: подпись "Статус дня" всегда видна и не уезжает
+        # при добавлении событий трекера.
+        header = ft.Column([
+            status_dropdown,
+            operator_dropdown,
+            ft.Text("Время прибытия:", size=11, color="#99ffffff"),
+            arrival_row,
+        ], spacing=10, tight=True)
+
+        body = ft.Column([
+            ft.Text("Корректировка часов (ручная):", size=11, color="#99ffffff"),
+            hours_slider, product_dropdown, weight_input, ft.Divider(),
+            ft.Text("Трекер ночи (хронология):", size=12, weight=ft.FontWeight.BOLD),
+            ft.Row([
+                ft.ElevatedButton("+ Перекур", on_click=lambda e: add_event(e, "Перекур")),
+                ft.ElevatedButton("▶ Работа", on_click=lambda e: add_event(e, "Работа")),
+            ], alignment=ft.MainAxisAlignment.CENTER),
+            timeline_list,
+        ], scroll=ft.ScrollMode.AUTO, spacing=10, expand=True)
+
         dialog = ft.AlertDialog(
             modal=True,
             title=ft.Text(f"Смена: {date_obj.strftime('%d.%m.%Y')}", color="white"),
             content=ft.Container(
-                # верхний отступ, чтобы плавающая подпись "Статус дня" не обрезалась при скролле
-                padding=ft.Padding.only(top=12, left=4, right=4),
-                content=ft.Column([
-                    status_dropdown,
-                    operator_dropdown,
-                    ft.Text("Время прибытия:", size=11, color="#99ffffff"),
-                    ft.Row([arrival_seg], alignment=ft.MainAxisAlignment.CENTER),
-                    ft.Text("Корректировка часов (ручная):", size=11, color="#99ffffff"),
-                    hours_slider, product_dropdown, weight_input, ft.Divider(),
-                    ft.Text("Трекер ночи (хронология):", size=12, weight=ft.FontWeight.BOLD),
-                    ft.Row([
-                        ft.ElevatedButton("+ Перекур", on_click=lambda e: add_event(e, "Перекур")),
-                        ft.ElevatedButton("▶ Работа", on_click=lambda e: add_event(e, "Работа")),
-                    ], alignment=ft.MainAxisAlignment.CENTER),
-                    timeline_list
-                ], scroll=ft.ScrollMode.AUTO, spacing=10), width=340, height=520
+                width=340, height=520,
+                # top=10 — место для плавающей подписи "Статус дня"
+                padding=ft.Padding.only(top=10, left=4, right=4),
+                content=ft.Column([header, body], spacing=10, expand=True),
             ),
             actions=[
                 ft.TextButton("Отмена", on_click=lambda e: close_dialog(dialog)),
