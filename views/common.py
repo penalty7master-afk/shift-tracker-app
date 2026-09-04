@@ -1,6 +1,6 @@
 import flet as ft
 
-from theme import set_icon, sync_value  # noqa: F401  (реэкспорт для экранов)
+from theme import safe_update, set_icon, sync_value  # noqa: F401  (реэкспорт для экранов)
 
 
 class AppContext:
@@ -58,15 +58,6 @@ def bind_event(control, handler, *names):
             setattr(control, attr, handler)
             return True
     return False
-
-
-def safe_update(control):
-    """Точечное обновление вместо page.update(): контрол может быть ещё не
-    добавлен на страницу, и тогда update() бросает исключение."""
-    try:
-        control.update()
-    except Exception:
-        pass
 
 
 def refresh_tree(*controls):
