@@ -1,11 +1,11 @@
-from datetime import date
-
 import flet as ft
 import flet_charts as fch
 
 from calculations import (format_hours, format_money, format_weight,
-                          month_summary, operator_stats, year_summaries)
-from constants import MONTH_SHORT, tax_label
+                          month_summary, norm_for_shop, operator_stats,
+                          production_summary, year_summaries)
+from constants import (MONTH_SHORT, SHOP1, SHOP2, SHOP_KEYS, SHOP_SHORT,
+                       SHOP_TITLES, tax_label)
 from database import db
 from views.common import safe_update
 
@@ -19,6 +19,8 @@ COLOR_EMPTY = "#4dffffff"
 
 
 class AnalyticsView:
+    """Четыре раздела: моё за месяц, производство, операторы, год."""
+
     def __init__(self, ctx):
         self.ctx = ctx
         self.th = ctx.theme
@@ -33,11 +35,10 @@ class AnalyticsView:
 
         self.chart_arrival = fch.PieChart(sections=[], sections_space=2,
                                           center_space_radius=22, expand=True)
-        self.chart_weight = fch.PieChart(sections=[], sections_space=2,
-                                         center_space_radius=22, expand=True)
 
         self.money_rows = ft.Column(spacing=6, tight=True)
-        self.operator_rows = ft.Column(spacing=8, tight=True)
+        self.production_rows = ft.Column(spacing=10, tight=True)
+        self.operator_rows = ft.Column(spacing=10, tight=True)
         self.year_bars = ft.Row(spacing=4, tight=True,
                                 vertical_alignment=ft.CrossAxisAlignment.END)
         self.year_title = th.text("", size=12, weight=ft.FontWeight.BOLD)
@@ -45,7 +46,7 @@ class AnalyticsView:
 
         self.control = ft.Column([
             th.card(ft.Column([
-                th.text("ДЕНЬГИ ЗА МЕСЯЦ", size=12, weight=ft.FontWeight.BOLD),
+                th.text("МОЁ ЗА МЕСЯЦ", size=12, weight=ft.FontWeight.BOLD),
                 self.money_rows,
             ], spacing=10, tight=True), padding=14),
 
@@ -54,15 +55,16 @@ class AnalyticsView:
                 th.text("вовремя / буфер / опоздание", role="dim", size=10),
                 ft.Container(self.chart_arrival, height=PIE_HEIGHT,
                              alignment=ft.Alignment.CENTER),
-                th.divider(),
-                th.text("Выработка продукции", size=12, weight=ft.FontWeight.BOLD),
-                th.text("норма выполнена / недовыработка", role="dim", size=10),
-                ft.Container(self.chart_weight, height=PIE_HEIGHT,
-                             alignment=ft.Alignment.CENTER),
             ], spacing=8, tight=True), padding=14),
 
             th.card(ft.Column([
-                th.text("СРАВНЕНИЕ ОПЕРАТОРОВ", size=12, weight=ft.FontWeight.BOLD),
+                th.text("ПРОИЗВОДСТВО ЗА МЕСЯЦ", size=12, weight=ft.FontWeight.BOLD),
+                th.text("По всем ночам, включая мои выходные.", role="faint", size=10),
+                self.production_rows,
+            ], spacing=10, tight=True), padding=14),
+
+            th.card(ft.Column([
+                th.text("ОПЕРАТОРЫ", size=12, weight=ft.FontWeight.BOLD),
                 self.operator_rows,
             ], spacing=10, tight=True), padding=14),
 
@@ -78,33 +80,34 @@ class AnalyticsView:
     # ==========================================
     def refresh(self):
         config = self.ctx.config
-        month_data = self.ctx.month_data
-        summary = month_summary(month_data, config)
+        shifts_data = self.ctx.month_data
+        production_data = getattr(self.ctx, "production_data", {})
 
-        self._refresh_money(summary, config)
-        self._refresh_pies(summary)
-        self._refresh_operators(month_data, config)
+        summary = month_summary(shifts_data, config)
+        self._refresh_money(summary)
+        self._refresh_arrival(summary)
+        self._refresh_production(production_data, config)
+        self._refresh_operators(production_data, config)
         self._refresh_year(config)
         safe_update(self.control)
 
     # ---------- деньги ----------
-    def _refresh_money(self, summary, config):
+    def _refresh_money(self, summary):
         th = self.th
-        tax_name = tax_label(summary["tax_rate"])
         rows = [
-            ("Отработано часов", f"{format_hours(summary['total_hours'])} ч", None),
-            ("Оплачиваемых часов", f"{format_hours(summary['paid_hours'])} ч", None),
+            ("Отработано смен", str(summary["shifts"]), None),
+            ("Часов", f"{format_hours(summary['total_hours'])} ч", None),
             ("Оклад по часам", format_money(summary["base_money"]), None),
             (f"Премия ({summary['premium_hours']} ч)",
              format_money(summary["premium_money"]), None),
             ("Начислено", format_money(summary["gross"]), None),
-            (f"Налог · {tax_name}", "− " + format_money(summary["tax_money"]),
+            (f"Налог · {tax_label(summary['tax_rate'])}",
+             "− " + format_money(summary["tax_money"]),
              COLOR_WARN if summary["tax_money"] else None),
             ("НА РУКИ", format_money(summary["net"]), th.accent()),
         ]
-        if summary["holidays"]:
-            rows.insert(2, (f"Праздничных смен (×{config.get('holiday_mult'):g})",
-                            str(summary["holidays"]), None))
+        if summary["overslept"]:
+            rows.insert(1, ("Проспал", str(summary["overslept"]), COLOR_BAD))
 
         controls = []
         for index, (label, value, color) in enumerate(rows):
@@ -121,14 +124,14 @@ class AnalyticsView:
                 controls.append(th.divider())
         self.money_rows.controls = controls
 
-    # ---------- круговые диаграммы ----------
+    # ---------- приход ----------
     def _section(self, value, color, title):
         return fch.PieChartSection(
             value=value, color=color, radius=28, title=title,
             title_style=ft.TextStyle(size=10, color="#ffffff",
                                      weight=ft.FontWeight.BOLD))
 
-    def _refresh_pies(self, summary):
+    def _refresh_arrival(self, summary):
         on_time, buffer_count, late = (summary["on_time"], summary["buffer"],
                                        summary["late"])
         total = on_time + buffer_count + late
@@ -141,36 +144,79 @@ class AnalyticsView:
         else:
             self.chart_arrival.sections = [self._section(1, COLOR_EMPTY, "Нет данных")]
 
-        ok, fail = summary["norm_ok"], summary["norm_fail"]
-        total_weight = ok + fail
-        if total_weight:
-            self.chart_weight.sections = [
-                self._section(ok, COLOR_OK, f"Норма {round(ok / total_weight * 100)}%"),
-                self._section(fail, COLOR_BAD, f"Недо {round(fail / total_weight * 100)}%"),
-            ]
-        else:
-            self.chart_weight.sections = [self._section(1, COLOR_EMPTY, "Нет данных")]
+    # ---------- производство ----------
+    def _refresh_production(self, production_data, config):
+        th = self.th
+        stats = production_summary(production_data, config)
+        controls = []
+
+        for shop in SHOP_KEYS:
+            row = stats[shop]
+            controls.append(ft.Row([
+                th.text(SHOP_TITLES[shop], size=12, weight=ft.FontWeight.BOLD,
+                        expand=True),
+                th.text(f"{row['nights']} ноч.", role="faint", size=10),
+            ]))
+
+            if not row["nights"]:
+                controls.append(th.text("Данных нет", role="faint", size=11))
+                controls.append(th.divider())
+                continue
+
+            share = row["norm_ok"] / row["nights"]
+            controls.append(th.text(
+                f"Всего {format_weight(row['total'])} кг · "
+                f"в среднем {format_weight(row['avg'])} кг за ночь",
+                role="dim", size=11))
+            controls.append(ft.ProgressBar(
+                value=share, color=COLOR_OK, bgcolor=COLOR_BAD,
+                bar_height=6, border_radius=3))
+            controls.append(th.text(
+                f"Норма {format_weight(row['norm'])} кг выполнена в "
+                f"{row['norm_ok']} из {row['nights']} ({round(share * 100)}%)",
+                role="faint", size=10))
+
+            for product, slot in sorted(row["by_product"].items(),
+                                        key=lambda kv: -kv[1]["weight"]):
+                controls.append(ft.Row([
+                    ft.Text(f"   {product}", size=11,
+                            color=th.color("text_dim"), expand=True),
+                    ft.Text(f"{format_weight(slot['weight'])} кг · {slot['nights']} ноч.",
+                            size=11, color=th.color("text_faint")),
+                ]))
+            controls.append(th.divider())
+
+        if controls and isinstance(controls[-1], ft.Divider):
+            controls.pop()
+        self.production_rows.controls = controls
 
     # ---------- операторы ----------
-    def _refresh_operators(self, month_data, config):
+    def _refresh_operators(self, production_data, config):
         th = self.th
-        stats = operator_stats(month_data, config)
-        max_shifts = max([row["shifts"] for row in stats.values()] + [1])
+        stats = operator_stats(production_data, config)
+        peak = max([row["nights"] for row in stats.values()] + [1])
 
         controls = []
         for name, row in stats.items():
-            if row["shifts"]:
-                detail = (f"{row['shifts']} см · опозданий {row['late']} · "
-                          f"средняя {format_weight(row['avg_weight'])} кг")
+            if not row["nights"]:
+                detail = "нет данных"
             else:
-                detail = "нет смен"
+                parts = []
+                for shop in SHOP_KEYS:
+                    cell = row[shop]
+                    if cell["nights"]:
+                        parts.append(f"{SHOP_SHORT[shop]}: "
+                                     f"средн. {format_weight(cell['avg'])} кг "
+                                     f"({cell['nights']} ноч.)")
+                detail = " · ".join(parts) if parts else "нет данных"
+
             controls.append(ft.Column([
                 ft.Row([
                     ft.Text(name, size=12, color=th.color("text"), expand=True),
-                    ft.Text(f"{format_hours(row['hours'])} ч", size=11,
+                    ft.Text(f"{row['nights']} ноч.", size=11,
                             color=th.color("text_dim")),
                 ]),
-                ft.ProgressBar(value=row["shifts"] / max_shifts,
+                ft.ProgressBar(value=row["nights"] / peak,
                                color=th.accent(), bgcolor=th.color("field_bg"),
                                bar_height=6, border_radius=3),
                 ft.Text(detail, size=10, color=th.color("text_faint")),
@@ -185,7 +231,8 @@ class AnalyticsView:
         # год перечитывается только при смене года, а не при каждом показе вкладки
         if self.year_cache["year"] != year:
             self.year_cache["year"] = year
-            self.year_cache["summaries"] = year_summaries(db.get_year_data(year), config)
+            self.year_cache["summaries"] = year_summaries(db.get_year_shifts(year),
+                                                          config)
         summaries = self.year_cache["summaries"]
 
         values = [item["net"] for item in summaries]
