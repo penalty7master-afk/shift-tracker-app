@@ -3,12 +3,11 @@ import time
 import flet as ft
 
 from database import db
-from views.common import bind_event, safe_update
+from views.common import safe_update
 
 MAX_ATTEMPTS = 5
 BASE_LOCKOUT_SECONDS = 30
-MIN_PIN = 4          # с этой длины начинаем проверять существующий PIN
-SETUP_PIN = 6        # новый PIN задаётся ровно такой длины
+MIN_PIN = 4
 MAX_PIN = 6
 
 KEY_SIZE = 68
@@ -50,7 +49,6 @@ class PinView:
         self.dots_row = ft.Row(self.dots, spacing=14, tight=True,
                                alignment=ft.MainAxisAlignment.CENTER)
 
-        self.keys = []
         self.control = ft.SafeArea(
             expand=True,
             content=ft.Container(
@@ -71,7 +69,6 @@ class PinView:
         )
 
         self._paint_dots()
-        self._paint_keys()
 
     # ==========================================
     # ЭЛЕМЕНТЫ
@@ -82,44 +79,8 @@ class PinView:
 
     @staticmethod
     def _spacer():
-        """Пустой слот той же ширины: держит 0 под восьмёркой, стирание под девяткой."""
+        """Пустой слот той же ширины: держит сетку выровненной по столбцам."""
         return ft.Container(width=KEY_SIZE, height=KEY_SIZE)
-
-    def _glass_key(self, content, on_press):
-        """
-        Стеклянная круглая кнопка: реальный backdrop-блюр плюс радиальный
-        градиент, светлеющий к краю — имитация выпуклого стекла.
-        Настоящее преломление требует фрагментного шейдера, которого во Flet нет.
-        """
-        key = ft.Container(
-            width=KEY_SIZE, height=KEY_SIZE, border_radius=KEY_SIZE // 2,
-            alignment=ft.Alignment.CENTER,
-            content=content,
-            ink=True,
-            animate_scale=ft.Animation(90, ft.AnimationCurve.EASE_OUT),
-        )
-        self.keys.append(key)
-
-        # Нажатие вешаем на GestureDetector ради «сжатия» кнопки; если в этой
-        # сборке Flet нет tap_down/tap_up — откатываемся на обычный on_click.
-        detector = ft.GestureDetector(content=key)
-        has_down = bind_event(detector, lambda e, k=key: self._squeeze(k, True),
-                              "on_tap_down")
-        has_up = bind_event(detector, lambda e, k=key, f=on_press:
-                            self._release(k, f), "on_tap_up")
-        if has_down and has_up:
-            return detector
-
-        key.on_click = lambda e, f=on_press: f()
-        return key
-
-    def _squeeze(self, key, pressed):
-        key.scale = 0.9 if pressed else 1.0
-        safe_update(key)
-
-    def _release(self, key, action):
-        self._squeeze(key, False)
-        action()
 
     def _digit_key(self, digit):
         th = self.ctx.theme
@@ -132,20 +93,41 @@ class PinView:
         content = ft.Column(rows, spacing=0, tight=True,
                             alignment=ft.MainAxisAlignment.CENTER,
                             horizontal_alignment=ft.CrossAxisAlignment.CENTER)
-        return self._glass_key(content, lambda d=digit: self._press(d))
+        return th.glass_key(content, lambda d=digit: self._press(d), size=KEY_SIZE)
 
     def _build_keypad(self):
-        rows = []
-        for line in (("1", "2", "3"), ("4", "5", "6"), ("7", "8", "9")):
-            rows.append(ft.Row([self._digit_key(d) for d in line],
-                               spacing=KEY_GAP, tight=True,
-                               alignment=ft.MainAxisAlignment.CENTER))
-
         th = self.ctx.theme
-        backspace = self._glass_key(
+        rows = []
+
+        rows.append(ft.Row([self._digit_key(d) for d in ("1", "2", "3")],
+                           spacing=KEY_GAP, tight=True,
+                           alignment=ft.MainAxisAlignment.CENTER))
+        rows.append(ft.Row([self._digit_key(d) for d in ("4", "5", "6")],
+                           spacing=KEY_GAP, tight=True,
+                           alignment=ft.MainAxisAlignment.CENTER))
+
+        # Кнопка подтверждения занимает столбец семёрки — держим её в Stack,
+        # чтобы при скрытии ряд не схлопывался и цифры не перепрыгивали.
+        self.confirm_slot = ft.Container(
+            width=KEY_SIZE, height=KEY_SIZE,
+            content=th.glass_key(
+                ft.Icon(ft.Icons.CHECK, size=24, color=th.accent()),
+                self._commit_setup, size=KEY_SIZE),
+            visible=False,
+        )
+        self.seven_slot = ft.Container(width=KEY_SIZE, height=KEY_SIZE,
+                                       content=self._digit_key("7"))
+        seven_stack = ft.Stack([self.seven_slot, self.confirm_slot],
+                               width=KEY_SIZE, height=KEY_SIZE)
+
+        rows.append(ft.Row([seven_stack, self._digit_key("8"), self._digit_key("9")],
+                           spacing=KEY_GAP, tight=True,
+                           alignment=ft.MainAxisAlignment.CENTER))
+
+        backspace = th.glass_key(
             ft.Icon(ft.Icons.BACKSPACE_OUTLINED, size=22,
                     color=th.color("text_dim")),
-            self._backspace)
+            self._backspace, size=KEY_SIZE)
         rows.append(ft.Row([self._spacer(), self._digit_key("0"), backspace],
                            spacing=KEY_GAP, tight=True,
                            alignment=ft.MainAxisAlignment.CENTER))
@@ -172,17 +154,25 @@ class PinView:
             dot.bgcolor = "#00000000"
             dot.border = ft.Border.all(1, ERROR_COLOR)
 
-    def _paint_keys(self):
-        th = self.ctx.theme
-        simple = bool(self.ctx.config.get("simple_bg"))
-        for key in self.keys:
-            key.gradient = ft.RadialGradient(
-                colors=["#0fffffff", "#14ffffff", "#3dffffff"],
-                stops=[0.0, 0.68, 1.0],
-            )
-            key.border = ft.Border.all(1, th.color("glass_border"))
-            key.blur = None if simple else ft.Blur(14, 14)
-            key.scale = 1.0
+    def _confirm_threshold(self):
+        """
+        При первом наборе кнопка появляется с четвёртой цифры.
+        При повторе — ровно с той длины, что была задана в первый раз.
+        """
+        if self.mode == "setup_confirm" and self.first_pin:
+            return len(self.first_pin)
+        return MIN_PIN
+
+    def _sync_confirm(self):
+        setup = self.mode.startswith("setup")
+        show = setup and len(self.digits) >= self._confirm_threshold()
+        self.confirm_slot.visible = show
+        self.seven_slot.visible = not show
+
+    def _refresh(self):
+        for control in (self.title, self.hint, self.error, self.dots_row,
+                        self.confirm_slot, self.seven_slot):
+            safe_update(control)
 
     # ==========================================
     # ПОКАЗ ЭКРАНА
@@ -198,13 +188,9 @@ class PinView:
         else:
             self.mode = "setup_new"
             self.title.value = "Придумайте PIN-код"
-            self.hint.value = f"{SETUP_PIN} цифр"
+            self.hint.value = "От 4 до 6 цифр"
         self._paint_dots()
-        self._paint_keys()
-
-    def _refresh(self):
-        for control in (self.title, self.hint, self.error, self.dots_row):
-            safe_update(control)
+        self._sync_confirm()
 
     # ==========================================
     # БЛОКИРОВКА ПОСЛЕ НЕУДАЧ
@@ -237,13 +223,12 @@ class PinView:
         self.digits += digit
         self.error.value = ""
         self._paint_dots()
+        self._sync_confirm()
         self._refresh()
 
-        if self.mode == "verify":
-            if len(self.digits) >= MIN_PIN:
-                self._try_verify()
-        elif len(self.digits) == SETUP_PIN:
-            self._commit_setup()
+        # При обычном входе подтверждать нечем — проверяем сами с четвёртой цифры.
+        if self.mode == "verify" and len(self.digits) >= MIN_PIN:
+            self._try_verify()
 
     def _backspace(self):
         if not self.digits:
@@ -251,18 +236,20 @@ class PinView:
         self.digits = self.digits[:-1]
         self.error.value = ""
         self._paint_dots()
+        self._sync_confirm()
         self._refresh()
 
     def _reset_input(self):
         self.digits = ""
         self._paint_dots()
+        self._sync_confirm()
 
     # ==========================================
     # ПРОВЕРКА И СОЗДАНИЕ
     # ==========================================
     def _try_verify(self):
         """
-        Проверяем на каждой цифре начиная с четвёртой — так работают старые
+        Проверяем на каждой цифре начиная с четвёртой — так работают
         короткие PIN-коды. Попытку тратим только когда набраны все шесть.
         """
         if db.verify_pin(self.digits):
@@ -288,11 +275,14 @@ class PinView:
         self._refresh()
 
     def _commit_setup(self):
+        if len(self.digits) < self._confirm_threshold():
+            return
+
         if self.mode == "setup_new":
             self.first_pin = self.digits
             self.mode = "setup_confirm"
             self.title.value = "Повторите PIN-код"
-            self.hint.value = ""
+            self.hint.value = f"{len(self.first_pin)} цифр"
             self.error.value = ""
             self._reset_input()
             self._refresh()
@@ -311,7 +301,7 @@ class PinView:
         self.mode = "setup_new"
         self.first_pin = None
         self.title.value = "Придумайте PIN-код"
-        self.hint.value = f"{SETUP_PIN} цифр"
+        self.hint.value = "От 4 до 6 цифр"
         self.error.value = "PIN-коды не совпадают, попробуйте снова"
         self._flash_dots()
         self._refresh()
