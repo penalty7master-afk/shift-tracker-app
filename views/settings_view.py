@@ -96,7 +96,8 @@ class SettingsView:
                 self.bg_column,
                 th.divider(),
                 self.simple_bg_switch,
-                th.text("Отключает светящиеся сферы и размытие — для слабых устройств.",
+                th.text("Отключает блюр, светящиеся сферы и анимацию переходов. "
+                        "Включайте, если интерфейс подтормаживает.",
                         role="faint", size=10),
             ], spacing=10, tight=True)),
 
@@ -193,7 +194,7 @@ class SettingsView:
             rows.append(row)
         self.bg_column = ft.Column(rows, spacing=4, tight=True)
 
-        self.simple_bg_switch = ft.Switch(label="Упрощённый фон (экономия)",
+        self.simple_bg_switch = ft.Switch(label="Режим скорости",
                                           active_color=th.accent())
         bind_event(self.simple_bg_switch, self._on_simple_bg,
                    "on_change", "on_changed")
@@ -216,6 +217,9 @@ class SettingsView:
         отматывал настройки в начало при каждом выборе фона.
         """
         self.ctx.theme.apply(self.page)
+        # Фон живёт в корневом Stack вне дерева настроек: без этой строки
+        # выбранная тональность появлялась только после следующего действия.
+        self.ctx.theme.refresh_background()
         self._paint_theme_selection()
         self._paint_tax()
         self._refresh_products()
