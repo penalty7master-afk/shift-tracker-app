@@ -3,6 +3,7 @@ import os
 import shutil
 import sqlite3
 
+from calculations import sort_products
 from constants import (DEFAULT_ACCENT, DEFAULT_BG_THEME, DEFAULT_CYCLE_START,
                        DEFAULT_NORM_SHOP1, DEFAULT_NORM_SHOP2, DEFAULT_TAX)
 
@@ -80,7 +81,8 @@ class DBManager:
                 hours REAL,
                 status TEXT,
                 arrival_status TEXT,
-                note TEXT
+                note TEXT,
+                premium_pay REAL
             )
         """)
         cur.execute("""
@@ -133,13 +135,11 @@ class DBManager:
                 cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
     def migrate(self):
-        """
-        Достраивает колонки в базах прежних версий. Старые поля shifts
-        (product, weight, operator, holiday) больше не используются — они
-        остаются в таблице мёртвым грузом, производственная статистика
-        начинается с чистого листа.
-        """
-        self._ensure_columns("shifts", {"note": "TEXT"})
+        """Достраивает колонки в базах прежних версий."""
+        self._ensure_columns("shifts", {
+            "note": "TEXT",
+            "premium_pay": "REAL",
+        })
         self._ensure_columns("app_config", {
             "bg_theme": "TEXT",
             "pin_salt": "TEXT",
@@ -156,7 +156,8 @@ class DBManager:
         cur.execute("SELECT COUNT(*) FROM products")
         if cur.fetchone()[0] == 0:
             cur.executemany("INSERT INTO products (name) VALUES (?)",
-                            [("Продукт 1",), ("Продукт 2",), ("Продукт 3",)])
+                            [("90",), ("90 ПВ",), ("200",), ("200 ПВ",),
+                             ("500",), ("500 ПВ",), ("Предпомол",)])
             self.conn.commit()
 
     def init_default_config(self):
@@ -246,24 +247,26 @@ class DBManager:
     # ==========================================
     # МОЙ ДЕНЬ
     # ==========================================
-    SHIFT_FIELDS = "hours, status, arrival_status, note"
+    SHIFT_FIELDS = "hours, status, arrival_status, note, premium_pay"
 
     @staticmethod
     def _row_to_shift(row):
-        return {"hours": row[0], "status": row[1],
-                "arrival_status": row[2], "note": row[3]}
+        return {"hours": row[0], "status": row[1], "arrival_status": row[2],
+                "note": row[3], "premium_pay": row[4]}
 
-    def save_shift(self, date_str, hours, status, arrival_status, note=None):
+    def save_shift(self, date_str, hours, status, arrival_status,
+                   note=None, premium_pay=None):
         cur = self.conn.cursor()
         cur.execute("""
-            INSERT INTO shifts (date, hours, status, arrival_status, note)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO shifts (date, hours, status, arrival_status, note, premium_pay)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(date) DO UPDATE SET
                 hours=excluded.hours,
                 status=excluded.status,
                 arrival_status=excluded.arrival_status,
-                note=excluded.note
-        """, (date_str, hours, status, arrival_status, note))
+                note=excluded.note,
+                premium_pay=excluded.premium_pay
+        """, (date_str, hours, status, arrival_status, note, premium_pay))
         self.conn.commit()
 
     def delete_shift(self, date_str):
@@ -414,9 +417,10 @@ class DBManager:
     # КАТАЛОГ ПРОДУКЦИИ
     # ==========================================
     def get_products(self):
+        """Сортировка по числу в названии: 90, 90 ПВ, 200, 200 ПВ, 500, 500 ПВ."""
         cur = self.conn.cursor()
-        cur.execute("SELECT name FROM products ORDER BY name")
-        return [r[0] for r in cur.fetchall()]
+        cur.execute("SELECT name FROM products")
+        return sort_products([r[0] for r in cur.fetchall()])
 
     def add_product(self, name):
         try:
