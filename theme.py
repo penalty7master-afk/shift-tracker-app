@@ -16,11 +16,27 @@ TEXT_ROLES = {
 GLASS_KEY_COLORS = ["#0fffffff", "#14ffffff", "#3dffffff"]
 GLASS_KEY_STOPS = [0.0, 0.68, 1.0]
 
+# Имя свойства иконки различается между сборками Flet — ищем реальное.
+ICON_ATTRS = ("icon", "name", "value")
+
 
 def sync_value(e):
     """Flet не всегда пишет ввод в .value до потери фокуса — синхронизируем вручную.
     Здесь сознательно нет page.update(): раньше он дёргался на каждый символ."""
     e.control.value = e.data
+
+
+def set_icon(control, icon_value):
+    """
+    Меняет символ у ft.Icon. Прямое присваивание .name в Flet 0.86 создаёт
+    новый атрибут вместо смены иконки — отсюда были стрелки, всегда
+    смотрящие вверх. Ищем то свойство, которое у контрола реально есть.
+    """
+    for attr in ICON_ATTRS:
+        if hasattr(control, attr):
+            setattr(control, attr, icon_value)
+            return True
+    return False
 
 
 class Theme:
@@ -60,6 +76,10 @@ class Theme:
     def simple_bg(self):
         return bool(self.config.get("simple_bg"))
 
+    def on_accent(self):
+        """Цвет текста поверх акцентной заливки: на светлом акценте — тёмный."""
+        return "#101014"
+
     def _role_color(self, role):
         if role == "accent":
             return self.accent()
@@ -87,6 +107,13 @@ class Theme:
         self._fields.append(control)
         return control
 
+    def icon(self, icon_value, role="normal", **kwargs):
+        """Иконка, перекрашиваемая вместе с темой."""
+        control = ft.Icon(icon_value, **kwargs)
+        control.color = self._role_color(role)
+        self._icons.append((control, role))
+        return control
+
     def icon_button(self, icon, role="normal", **kwargs):
         control = ft.IconButton(icon, **kwargs)
         control.icon_color = self._role_color(role)
@@ -103,6 +130,14 @@ class Theme:
         control.color = self.color("text")
         control.border_color = self.color("field_border")
         control.label_style = ft.TextStyle(color=self.color("text_dim"))
+
+    @staticmethod
+    def _paint_icon(control, color):
+        """У IconButton цвет в icon_color, у Icon — в color."""
+        if hasattr(control, "icon_color"):
+            control.icon_color = color
+        else:
+            control.color = color
 
     # ==========================================
     # СТЕКЛЯННАЯ КРУГЛАЯ КНОПКА
@@ -230,6 +265,10 @@ class Theme:
     # ПРИМЕНЕНИЕ ТЕМЫ
     # ==========================================
     def apply(self, page):
+        """
+        Перекрашивает уже созданные контролы на месте. Полный page.update()
+        сюда сознательно не входит: он сбрасывал прокрутку настроек наверх.
+        """
         pal = self.palette()
         page.theme = ft.Theme(color_scheme_seed=self.accent())
         page.theme_mode = ft.ThemeMode.DARK if self.is_dark() else ft.ThemeMode.LIGHT
@@ -257,7 +296,7 @@ class Theme:
             self._paint_field(control)
 
         for control, role in self._icons:
-            control.icon_color = self._role_color(role)
+            self._paint_icon(control, self._role_color(role))
 
         for control in self._dividers:
             control.color = pal["glass_border"]
