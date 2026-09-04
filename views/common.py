@@ -1,6 +1,6 @@
 import flet as ft
 
-from theme import sync_value  # noqa: F401  (реэкспорт для остальных экранов)
+from theme import set_icon, sync_value  # noqa: F401  (реэкспорт для экранов)
 
 
 class AppContext:
@@ -13,7 +13,9 @@ class AppContext:
         self.theme = theme
 
         self.view = {"year": 0, "month": 0}
-        self.month_data = {}          # кэш текущего месяца: один запрос вместо трёх
+        self.month_data = {}          # кэш смен месяца: один запрос вместо трёх
+        self.production_data = {}     # кэш производства месяца
+        self.timeline_dates = set()   # дни месяца, где велась хронология
         self.analytics_dirty = True   # аналитика пересчитывается только при показе
 
         # заполняются в ui.py
@@ -65,6 +67,16 @@ def safe_update(control):
         control.update()
     except Exception:
         pass
+
+
+def refresh_tree(*controls):
+    """
+    Обновляет несколько контролов подряд. Нужен там, где раньше стоял
+    page.update(): полное обновление страницы сбрасывает позицию прокрутки
+    в начало, и настройки прыгали наверх при выборе темы или удалении продукта.
+    """
+    for control in controls:
+        safe_update(control)
 
 
 # ==========================================
@@ -119,6 +131,6 @@ def dialog_width(page, maximum=360):
     return int(min(maximum, max(260, width - 48)))
 
 
-def dialog_height(page, maximum=560):
+def dialog_height(page, maximum=600):
     height = page.height or 700
-    return int(min(maximum, max(360, height - 220)))
+    return int(min(maximum, max(360, height - 200)))
