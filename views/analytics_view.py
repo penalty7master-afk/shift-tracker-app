@@ -2,10 +2,9 @@ import flet as ft
 import flet_charts as fch
 
 from calculations import (format_hours, format_money, format_weight,
-                          month_summary, norm_for_shop, operator_stats,
-                          production_summary, year_summaries)
-from constants import (MONTH_SHORT, SHOP1, SHOP2, SHOP_KEYS, SHOP_SHORT,
-                       SHOP_TITLES, tax_label)
+                          month_summary, operator_stats, production_summary,
+                          year_summaries)
+from constants import (MONTH_SHORT, SHOP_KEYS, SHOP_SHORT, SHOP_TITLES, tax_label)
 from database import db
 from views.common import safe_update
 
@@ -73,6 +72,8 @@ class AnalyticsView:
                 ft.Container(self.year_bars, height=BAR_HEIGHT + 26),
                 self.year_total,
             ], spacing=10, tight=True), padding=14),
+
+            ft.Container(height=20),
         ], spacing=10, scroll=ft.ScrollMode.AUTO, expand=True)
 
     # ==========================================
@@ -81,7 +82,7 @@ class AnalyticsView:
     def refresh(self):
         config = self.ctx.config
         shifts_data = self.ctx.month_data
-        production_data = getattr(self.ctx, "production_data", {})
+        production_data = self.ctx.production_data
 
         summary = month_summary(shifts_data, config)
         self._refresh_money(summary)
@@ -98,8 +99,13 @@ class AnalyticsView:
             ("Отработано смен", str(summary["shifts"]), None),
             ("Часов", f"{format_hours(summary['total_hours'])} ч", None),
             ("Оклад по часам", format_money(summary["base_money"]), None),
-            (f"Премия ({summary['premium_hours']} ч)",
+            (f"Премия за смены ({summary['premium_hours']} ч)",
              format_money(summary["premium_money"]), None),
+        ]
+        if summary["premium_off"] or summary["premium_paid"]:
+            rows.append((f"Выплачено премии ({summary['premium_off']} дн.)",
+                         format_money(summary["premium_paid"]), COLOR_OK))
+        rows += [
             ("Начислено", format_money(summary["gross"]), None),
             (f"Налог · {tax_label(summary['tax_rate'])}",
              "− " + format_money(summary["tax_money"]),
