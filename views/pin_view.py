@@ -3,7 +3,7 @@ import time
 import flet as ft
 
 from database import db
-from views.common import safe_update
+from views.common import refresh_tree, safe_update
 
 MAX_ATTEMPTS = 5
 BASE_LOCKOUT_SECONDS = 30
@@ -78,9 +78,10 @@ class PinView:
         return ft.Container(width=13, height=13, border_radius=7)
 
     @staticmethod
-    def _spacer():
-        """Пустой слот той же ширины: держит сетку выровненной по столбцам."""
-        return ft.Container(width=KEY_SIZE, height=KEY_SIZE)
+    def _slot(content=None):
+        """Слот фиксированной ширины: держит столбцы выровненными,
+        даже когда кнопка внутри скрыта."""
+        return ft.Container(width=KEY_SIZE, height=KEY_SIZE, content=content)
 
     def _digit_key(self, digit):
         th = self.ctx.theme
@@ -99,38 +100,30 @@ class PinView:
         th = self.ctx.theme
         rows = []
 
-        rows.append(ft.Row([self._digit_key(d) for d in ("1", "2", "3")],
-                           spacing=KEY_GAP, tight=True,
-                           alignment=ft.MainAxisAlignment.CENTER))
-        rows.append(ft.Row([self._digit_key(d) for d in ("4", "5", "6")],
-                           spacing=KEY_GAP, tight=True,
-                           alignment=ft.MainAxisAlignment.CENTER))
+        for line in (("1", "2", "3"), ("4", "5", "6"), ("7", "8", "9")):
+            rows.append(ft.Row([self._digit_key(d) for d in line],
+                               spacing=KEY_GAP, tight=True,
+                               alignment=ft.MainAxisAlignment.CENTER))
 
-        # Кнопка подтверждения занимает столбец семёрки — держим её в Stack,
-        # чтобы при скрытии ряд не схлопывался и цифры не перепрыгивали.
-        self.confirm_slot = ft.Container(
-            width=KEY_SIZE, height=KEY_SIZE,
-            content=th.glass_key(
-                ft.Icon(ft.Icons.CHECK, size=24, color=th.accent()),
-                self._commit_setup, size=KEY_SIZE),
-            visible=False,
-        )
-        self.seven_slot = ft.Container(width=KEY_SIZE, height=KEY_SIZE,
-                                       content=self._digit_key("7"))
-        seven_stack = ft.Stack([self.seven_slot, self.confirm_slot],
-                               width=KEY_SIZE, height=KEY_SIZE)
-
-        rows.append(ft.Row([seven_stack, self._digit_key("8"), self._digit_key("9")],
-                           spacing=KEY_GAP, tight=True,
-                           alignment=ft.MainAxisAlignment.CENTER))
+        # Нижний ряд: галочка стоит в столбце семёрки, то есть прямо под ней.
+        # Семёрка при этом никуда не девается.
+        self.confirm_slot = self._slot(th.glass_key(
+            ft.Icon(ft.Icons.CHECK, size=24, color=th.accent()),
+            self._commit_setup, size=KEY_SIZE))
+        self.confirm_slot.visible = False
+        self.empty_slot = self._slot()
 
         backspace = th.glass_key(
             ft.Icon(ft.Icons.BACKSPACE_OUTLINED, size=22,
                     color=th.color("text_dim")),
             self._backspace, size=KEY_SIZE)
-        rows.append(ft.Row([self._spacer(), self._digit_key("0"), backspace],
-                           spacing=KEY_GAP, tight=True,
-                           alignment=ft.MainAxisAlignment.CENTER))
+
+        rows.append(ft.Row([
+            ft.Stack([self.empty_slot, self.confirm_slot],
+                     width=KEY_SIZE, height=KEY_SIZE),
+            self._digit_key("0"),
+            backspace,
+        ], spacing=KEY_GAP, tight=True, alignment=ft.MainAxisAlignment.CENTER))
 
         return ft.Column(rows, spacing=KEY_GAP, tight=True,
                          horizontal_alignment=ft.CrossAxisAlignment.CENTER)
@@ -165,14 +158,12 @@ class PinView:
 
     def _sync_confirm(self):
         setup = self.mode.startswith("setup")
-        show = setup and len(self.digits) >= self._confirm_threshold()
-        self.confirm_slot.visible = show
-        self.seven_slot.visible = not show
+        self.confirm_slot.visible = (setup and
+                                     len(self.digits) >= self._confirm_threshold())
 
     def _refresh(self):
-        for control in (self.title, self.hint, self.error, self.dots_row,
-                        self.confirm_slot, self.seven_slot):
-            safe_update(control)
+        refresh_tree(self.title, self.hint, self.error,
+                     self.dots_row, self.confirm_slot)
 
     # ==========================================
     # ПОКАЗ ЭКРАНА
