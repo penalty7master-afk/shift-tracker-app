@@ -4,21 +4,21 @@ from datetime import date, datetime
 import flet as ft
 
 from calculations import (format_hours, format_money, month_forecast,
-                          month_summary, next_shift_info,
-                          planned_dates_for_operator, get_operator_for_date)
-from constants import (ARRIVAL_OPTIONS, FULL_SHIFT_HOURS, MONTH_NAMES,
-                       STATUS_COLORS, STATUS_WORK, WEEKDAY_SHORT, WEIGHT_NORM)
-from database import db
-from views.common import confirm_dialog, info_dialog, safe_update
+                          month_summary, get_operator_for_date, norm_for_shop,
+                          op_names_from)
+from constants import (MONTH_NAMES, SHOP1, SHOP2, STATUS_COLORS, STATUS_WORK,
+                       WEEKDAY_SHORT)
+from views.common import safe_update
 from views.day_modal import show_day_modal
 
 WEEKS = 6
-CELL_HEIGHT = 62
+CELL_HEIGHT = 66
 TRANSPARENT = "#00000000"
 
+ARROW_UP = "#6ee7b7"
+ARROW_DOWN = "#f87171"
 DOT_NOTE = "#7dd3fc"
-DOT_HOLIDAY = "#fbbf24"
-DOT_UNDER_NORM = "#f87171"
+DOT_TRACKER = "#c4b5fd"
 
 
 class CalendarView:
@@ -71,22 +71,27 @@ class CalendarView:
             drag_interval=50,
         )
 
+        self._build_legend()
         self._build_premium_card()
-        self._build_footer()
+        self._build_forecast_card()
 
         self.control = ft.Column(
-            [month_row, swipeable, self.premium_card, self.footer_card],
+            [month_row, swipeable, self.legend_row,
+             self.premium_card, self.forecast_card],
             spacing=10, scroll=ft.ScrollMode.AUTO, expand=True,
         )
 
     def _make_cell(self):
         day_text = ft.Text("", size=14, weight=ft.FontWeight.BOLD)
         op_text = ft.Text("", size=9)
-        dots = ft.Row([self._make_dot() for _i in range(3)],
-                      spacing=3, tight=True,
-                      alignment=ft.MainAxisAlignment.CENTER)
-        cell = ft.Container(
-            content=ft.Column([day_text, op_text, dots],
+        marks = ft.Row([
+            ft.Icon(ft.Icons.ARROW_UPWARD, size=11, visible=False),
+            ft.Icon(ft.Icons.ARROW_UPWARD, size=11, visible=False),
+            self._make_dot(),
+            self._make_dot(),
+        ], spacing=2, tight=True, alignment=ft.MainAxisAlignment.CENTER)
+        return ft.Container(
+            content=ft.Column([day_text, op_text, marks],
                               spacing=1, tight=True,
                               alignment=ft.MainAxisAlignment.CENTER,
                               horizontal_alignment=ft.CrossAxisAlignment.CENTER),
@@ -94,11 +99,26 @@ class CalendarView:
             alignment=ft.Alignment.CENTER,
             on_click=self._on_cell_click,
         )
-        return cell
 
     @staticmethod
     def _make_dot():
         return ft.Container(width=5, height=5, border_radius=3, visible=False)
+
+    def _build_legend(self):
+        th = self.th
+        items = [
+            (ft.Icon(ft.Icons.ARROW_UPWARD, size=11, color=ARROW_UP), "цех 1"),
+            (ft.Icon(ft.Icons.ARROW_DOWNWARD, size=11, color=ARROW_DOWN), "цех 2"),
+            (ft.Container(width=6, height=6, border_radius=3, bgcolor=DOT_NOTE), "заметка"),
+            (ft.Container(width=6, height=6, border_radius=3, bgcolor=DOT_TRACKER), "хронология"),
+        ]
+        controls = []
+        for mark, label in items:
+            controls.append(ft.Row([
+                mark, ft.Text(label, size=9, color=th.color("text_faint")),
+            ], spacing=4, tight=True))
+        self.legend_row = ft.Row(controls, spacing=12, wrap=True,
+                                 alignment=ft.MainAxisAlignment.CENTER)
 
     def _build_premium_card(self):
         th = self.th
@@ -111,15 +131,12 @@ class CalendarView:
             ft.Column([self.premium_title, self.premium_bar, self.premium_hint],
                       spacing=8, tight=True), padding=14)
 
-    def _build_footer(self):
+    def _build_forecast_card(self):
         th = self.th
-        self.next_shift_text = th.text("", role="dim", size=11)
+        self.fact_text = th.text("", role="dim", size=11)
         self.forecast_text = th.text("", role="dim", size=11)
-        self.autofill_button = ft.OutlinedButton(
-            "Заполнить месяц по графику", on_click=self._confirm_autofill)
-        self.footer_card = th.card(
-            ft.Column([self.next_shift_text, self.forecast_text,
-                       self.autofill_button], spacing=8, tight=True),
+        self.forecast_card = th.card(
+            ft.Column([self.fact_text, self.forecast_text], spacing=6, tight=True),
             padding=14)
 
     # ==========================================
@@ -151,13 +168,15 @@ class CalendarView:
     # ОТРИСОВКА
     # ==========================================
     def refresh(self):
-        th = self.th
         year, month = self.ctx.view["year"], self.ctx.view["month"]
-        month_data = self.ctx.month_data
+        shifts_data = self.ctx.month_data
+        production_data = getattr(self.ctx, "production_data", {})
         config = self.ctx.config
-        ops = [config.get(f"op{i}") for i in range(1, 5)]
+        ops = op_names_from(config)
         cycle_start = config.get("cycle_start")
-        norms = config.get("product_norms") or {}
+        timeline_dates = self.ctx.timeline_dates
+        norms = {SHOP1: norm_for_shop(SHOP1, config),
+                 SHOP2: norm_for_shop(SHOP2, config)}
         today = date.today()
 
         self.month_label.value = f"{MONTH_NAMES[month - 1]} {year}"
@@ -171,16 +190,17 @@ class CalendarView:
             for day_index in range(7):
                 self._paint_cell(self.cells[week_index][day_index],
                                  week[day_index], year, month, day_index,
-                                 month_data, ops, cycle_start, norms, today)
+                                 shifts_data, production_data, ops, cycle_start,
+                                 norms, timeline_dates, today)
 
-        self._refresh_premium(month_data, config)
-        self._refresh_footer(year, month, month_data, config, ops, cycle_start, today)
+        self._refresh_premium(shifts_data, config)
+        self._refresh_forecast(year, month, shifts_data, config, today)
         safe_update(self.control)
 
-    def _paint_cell(self, cell, day, year, month, weekday,
-                    month_data, ops, cycle_start, norms, today):
+    def _paint_cell(self, cell, day, year, month, weekday, shifts_data,
+                    production_data, ops, cycle_start, norms, timeline_dates, today):
         th = self.th
-        day_text, op_text, dots = cell.content.controls
+        day_text, op_text, marks = cell.content.controls
 
         if day == 0:
             cell.data = None
@@ -191,18 +211,19 @@ class CalendarView:
         current = date(year, month, day)
         date_str = current.strftime("%Y-%m-%d")
         cell.data = date_str
-        saved = month_data.get(date_str)
+        shift = shifts_data.get(date_str)
+        record = production_data.get(date_str)
 
-        # подмена оператора вручную приоритетнее графика 4/4
-        operator = (saved or {}).get("operator") or get_operator_for_date(
+        # оператор из записи производства приоритетнее графика
+        operator = (record or {}).get("operator") or get_operator_for_date(
             current, ops, cycle_start)
 
         bg_color = th.color("weekend") if weekday >= 5 else TRANSPARENT
         border_color = th.color("cell_border")
         border_width = 1
 
-        if saved:
-            status = saved.get("status")
+        if shift:
+            status = shift.get("status")
             fill, stroke = STATUS_COLORS.get(status, (TRANSPARENT, None))
             if status == STATUS_WORK:
                 bg_color = th.accent_a("26")
@@ -224,32 +245,39 @@ class CalendarView:
         op_text.value = self._short_name(operator)
         op_text.color = th.color("text_faint")
 
-        self._paint_dots(dots, saved, norms)
+        self._paint_marks(marks, shift, record, norms,
+                          date_str in timeline_dates)
 
-    def _paint_dots(self, dots, saved, norms):
-        flags = [(False, DOT_NOTE), (False, DOT_HOLIDAY), (False, DOT_UNDER_NORM)]
-        if saved:
-            under_norm = False
-            if saved.get("status") == STATUS_WORK:
-                norm = float(norms.get(saved.get("product"), WEIGHT_NORM) or WEIGHT_NORM)
-                under_norm = float(saved.get("weight") or 0.0) < norm
-            flags = [
-                (bool(saved.get("note")), DOT_NOTE),
-                (bool(saved.get("holiday")), DOT_HOLIDAY),
-                (under_norm, DOT_UNDER_NORM),
-            ]
-        for dot, (visible, color) in zip(dots.controls, flags):
-            dot.visible = visible
-            dot.bgcolor = color
+    def _paint_marks(self, marks, shift, record, norms, has_timeline):
+        arrow1, arrow2, dot_note, dot_tracker = marks.controls
+
+        for arrow, key in ((arrow1, "weight1"), (arrow2, "weight2")):
+            shop = SHOP1 if key == "weight1" else SHOP2
+            weight = (record or {}).get(key)
+            if weight is None:
+                arrow.visible = False
+                continue
+            arrow.visible = True
+            if float(weight) >= norms[shop]:
+                arrow.name = ft.Icons.ARROW_UPWARD
+                arrow.color = ARROW_UP
+            else:
+                arrow.name = ft.Icons.ARROW_DOWNWARD
+                arrow.color = ARROW_DOWN
+
+        dot_note.visible = bool(shift and shift.get("note"))
+        dot_note.bgcolor = DOT_NOTE
+        dot_tracker.visible = has_timeline
+        dot_tracker.bgcolor = DOT_TRACKER
 
     @staticmethod
     def _short_name(name):
         parts = (name or "").split()
         return parts[-1] if parts else "—"
 
-    # ---------- премия и подвал ----------
-    def _refresh_premium(self, month_data, config):
-        summary = month_summary(month_data, config)
+    # ---------- премия и прогноз ----------
+    def _refresh_premium(self, shifts_data, config):
+        summary = month_summary(shifts_data, config)
         step = summary["next_step"]
 
         self.premium_title.value = (
@@ -266,67 +294,19 @@ class CalendarView:
             self.premium_hint.value = (
                 f"До ступени {threshold} смен ({hours} ч премии) осталось: {left}")
 
-    def _refresh_footer(self, year, month, month_data, config, ops, cycle_start, today):
-        upcoming = next_shift_info(config, today)
-        if upcoming is None:
-            self.next_shift_text.value = (
-                "Выберите «Мой оператор» в настройках — появится прогноз и график")
-        else:
-            shift_date, offset = upcoming
-            when = ("сегодня" if offset == 0 else
-                    "завтра" if offset == 1 else f"через {offset} дн.")
-            weekday = WEEKDAY_SHORT[shift_date.weekday()]
-            self.next_shift_text.value = (
-                f"Следующая смена: {weekday}, {shift_date.strftime('%d.%m')} ({when})")
+    def _refresh_forecast(self, year, month, shifts_data, config, today):
+        summary = month_summary(shifts_data, config)
+        self.fact_text.value = (
+            f"Факт: {summary['shifts']} смен · "
+            f"{format_hours(summary['total_hours'])} ч · "
+            f"на руки {format_money(summary['net'])}")
 
-        forecast = month_forecast(year, month, month_data, config, today)
+        forecast = month_forecast(year, month, shifts_data, config, today)
         if forecast is None:
-            summary = month_summary(month_data, config)
-            self.forecast_text.value = (
-                f"Отработано {format_hours(summary['total_hours'])} ч · "
-                f"на руки {format_money(summary['net'])}")
+            self.forecast_text.value = "Месяц закрыт — прогноз не считается"
         else:
             self.forecast_text.value = (
-                f"Прогноз на конец месяца: {forecast['shifts']} смен, "
-                f"на руки {format_money(forecast['net'])} "
-                f"(осталось {forecast['remaining']})")
-
-        self.autofill_button.visible = bool(config.get("my_operator"))
-
-    # ==========================================
-    # АВТОЗАПОЛНЕНИЕ
-    # ==========================================
-    def _confirm_autofill(self, e=None):
-        year, month = self.ctx.view["year"], self.ctx.view["month"]
-        config = self.ctx.config
-        ops = [config.get(f"op{i}") for i in range(1, 5)]
-        my_op = config.get("my_operator")
-
-        planned = planned_dates_for_operator(year, month, ops, my_op,
-                                             config.get("cycle_start"))
-        fresh = [d for d in planned
-                 if d.strftime("%Y-%m-%d") not in self.ctx.month_data]
-
-        if not fresh:
-            info_dialog(self.ctx, "Нечего заполнять",
-                        "Все смены этого месяца по графику уже отмечены.")
-            return
-
-        confirm_dialog(
-            self.ctx, "Заполнить месяц?",
-            f"Будет добавлено {len(fresh)} рабочих смен для «{my_op}». "
-            "Уже существующие записи останутся нетронутыми.",
-            lambda: self._do_autofill(fresh, my_op),
-            confirm_label="Заполнить", danger=False,
-        )
-
-    def _do_autofill(self, dates, operator):
-        products = db.get_products()
-        product, norm = products[0] if products else (None, WEIGHT_NORM)
-        rows = [
-            (d.strftime("%Y-%m-%d"), FULL_SHIFT_HOURS, STATUS_WORK, product,
-             norm, ARRIVAL_OPTIONS[0], operator, None, 0)
-            for d in dates
-        ]
-        db.save_shifts_bulk(rows)
-        self.ctx.refresh_after_change()
+                f"Если выйти во все оставшиеся {forecast['remaining']} дн.: "
+                f"{forecast['shifts']} смен, премия {forecast['premium_hours']} ч, "
+                f"на руки {format_money(forecast['net'])}")
+        safe_update(self.control)
