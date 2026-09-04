@@ -4,14 +4,14 @@ import shutil
 import sqlite3
 
 from constants import (DEFAULT_ACCENT, DEFAULT_BG_THEME, DEFAULT_CYCLE_START,
-                       DEFAULT_HOLIDAY_MULT, DEFAULT_TAX, WEIGHT_NORM)
+                       DEFAULT_NORM_SHOP1, DEFAULT_NORM_SHOP2, DEFAULT_TAX)
 
 PBKDF2_ROUNDS = 100_000
 
 # Колонки app_config, которые разрешено писать через save_config()
 CONFIG_WRITABLE = (
     "hour_rate", "theme", "bg_theme", "op1", "op2", "op3", "op4",
-    "tax_rate", "cycle_start", "my_operator", "simple_bg", "holiday_mult",
+    "tax_rate", "cycle_start", "simple_bg", "norm_shop1", "norm_shop2",
 )
 
 CONFIG_DEFAULTS = {
@@ -24,9 +24,9 @@ CONFIG_DEFAULTS = {
     "op4": "Оператор 4",
     "tax_rate": DEFAULT_TAX,
     "cycle_start": DEFAULT_CYCLE_START,
-    "my_operator": "",
     "simple_bg": 0,
-    "holiday_mult": DEFAULT_HOLIDAY_MULT,
+    "norm_shop1": DEFAULT_NORM_SHOP1,
+    "norm_shop2": DEFAULT_NORM_SHOP2,
 }
 
 
@@ -34,6 +34,13 @@ CONFIG_DEFAULTS = {
 # ДВИЖОК БАЗЫ ДАННЫХ
 # ==========================================
 class DBManager:
+    """
+    Две независимые сущности:
+      shifts     — мой день (работал / выходной / проспал, часы, приход, заметка);
+      production — ночь производства (оператор, продукт и кг по каждому цеху).
+    Производство можно вносить и за те ночи, когда меня на смене не было.
+    """
+
     def __init__(self):
         # На Android рабочая директория недоступна для записи.
         # Flet передаёт путь к хранилищу приложения в FLET_APP_STORAGE_DATA.
@@ -72,18 +79,23 @@ class DBManager:
                 date TEXT PRIMARY KEY,
                 hours REAL,
                 status TEXT,
-                product TEXT,
-                weight REAL,
                 arrival_status TEXT,
+                note TEXT
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS production (
+                date TEXT PRIMARY KEY,
                 operator TEXT,
-                note TEXT,
-                holiday INTEGER DEFAULT 0
+                product1 TEXT,
+                weight1 REAL,
+                product2 TEXT,
+                weight2 REAL
             )
         """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS products (
-                name TEXT PRIMARY KEY,
-                norm REAL
+                name TEXT PRIMARY KEY
             )
         """)
         cur.execute("""
@@ -105,9 +117,9 @@ class DBManager:
                 pin_salt TEXT,
                 tax_rate REAL,
                 cycle_start TEXT,
-                my_operator TEXT,
                 simple_bg INTEGER,
-                holiday_mult REAL
+                norm_shop1 REAL,
+                norm_shop2 REAL
             )
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_timeline_date ON timeline(date)")
@@ -121,33 +133,30 @@ class DBManager:
                 cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
     def migrate(self):
-        """Достраивает колонки в базах, созданных предыдущими версиями."""
-        self._ensure_columns("shifts", {
-            "operator": "TEXT",
-            "note": "TEXT",
-            "holiday": "INTEGER DEFAULT 0",
-        })
-        self._ensure_columns("products", {"norm": "REAL"})
+        """
+        Достраивает колонки в базах прежних версий. Старые поля shifts
+        (product, weight, operator, holiday) больше не используются — они
+        остаются в таблице мёртвым грузом, производственная статистика
+        начинается с чистого листа.
+        """
+        self._ensure_columns("shifts", {"note": "TEXT"})
         self._ensure_columns("app_config", {
             "bg_theme": "TEXT",
             "pin_salt": "TEXT",
             "tax_rate": "REAL",
             "cycle_start": "TEXT",
-            "my_operator": "TEXT",
             "simple_bg": "INTEGER",
-            "holiday_mult": "REAL",
+            "norm_shop1": "REAL",
+            "norm_shop2": "REAL",
         })
-        cur = self.conn.cursor()
-        cur.execute("UPDATE products SET norm=? WHERE norm IS NULL", (WEIGHT_NORM,))
         self.conn.commit()
 
     def init_default_products(self):
         cur = self.conn.cursor()
         cur.execute("SELECT COUNT(*) FROM products")
         if cur.fetchone()[0] == 0:
-            cur.executemany("INSERT INTO products (name, norm) VALUES (?, ?)",
-                            [("Линия 3 (цех 2)", 2100.0),
-                             ("Линии 1+2 (цех 1)", 5900.0)])
+            cur.executemany("INSERT INTO products (name) VALUES (?)",
+                            [("Продукт 1",), ("Продукт 2",), ("Продукт 3",)])
             self.conn.commit()
 
     def init_default_config(self):
@@ -170,11 +179,11 @@ class DBManager:
                 cfg[key] = default
         cfg["hour_rate"] = float(cfg["hour_rate"])
         cfg["tax_rate"] = float(cfg["tax_rate"])
-        cfg["holiday_mult"] = float(cfg["holiday_mult"])
+        cfg["norm_shop1"] = float(cfg["norm_shop1"])
+        cfg["norm_shop2"] = float(cfg["norm_shop2"])
         cfg["simple_bg"] = int(cfg["simple_bg"] or 0)
         cfg.setdefault("pin_hash", None)
         cfg.setdefault("pin_salt", None)
-        cfg["product_norms"] = self.get_product_norms()
         return cfg
 
     def save_config(self, **values):
@@ -234,52 +243,41 @@ class DBManager:
         cur.execute("UPDATE app_config SET pin_hash=NULL, pin_salt=NULL WHERE id=1")
         self.conn.commit()
 
-    # ---------- смены ----------
-    def save_shift(self, date_str, hours, status, product, weight,
-                   arrival_status, operator=None, note=None, holiday=0):
+    # ==========================================
+    # МОЙ ДЕНЬ
+    # ==========================================
+    SHIFT_FIELDS = "hours, status, arrival_status, note"
+
+    @staticmethod
+    def _row_to_shift(row):
+        return {"hours": row[0], "status": row[1],
+                "arrival_status": row[2], "note": row[3]}
+
+    def save_shift(self, date_str, hours, status, arrival_status, note=None):
         cur = self.conn.cursor()
         cur.execute("""
-            INSERT INTO shifts (date, hours, status, product, weight,
-                                arrival_status, operator, note, holiday)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO shifts (date, hours, status, arrival_status, note)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(date) DO UPDATE SET
                 hours=excluded.hours,
                 status=excluded.status,
-                product=excluded.product,
-                weight=excluded.weight,
                 arrival_status=excluded.arrival_status,
-                operator=excluded.operator,
-                note=excluded.note,
-                holiday=excluded.holiday
-        """, (date_str, hours, status, product, weight, arrival_status,
-              operator, note, int(bool(holiday))))
+                note=excluded.note
+        """, (date_str, hours, status, arrival_status, note))
         self.conn.commit()
-
-    def save_shifts_bulk(self, rows):
-        """Пакетная запись для автозаполнения месяца — один commit на все дни."""
-        cur = self.conn.cursor()
-        cur.executemany("""
-            INSERT INTO shifts (date, hours, status, product, weight,
-                                arrival_status, operator, note, holiday)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(date) DO NOTHING
-        """, rows)
-        self.conn.commit()
-        return cur.rowcount
 
     def delete_shift(self, date_str):
         cur = self.conn.cursor()
         cur.execute("DELETE FROM shifts WHERE date=?", (date_str,))
-        cur.execute("DELETE FROM timeline WHERE date=?", (date_str,))
         self.conn.commit()
 
-    @staticmethod
-    def _row_to_shift(row):
-        return {"hours": row[0], "status": row[1], "product": row[2],
-                "weight": row[3], "arrival_status": row[4], "operator": row[5],
-                "note": row[6], "holiday": bool(row[7])}
-
-    SHIFT_FIELDS = "hours, status, product, weight, arrival_status, operator, note, holiday"
+    def delete_day(self, date_str):
+        """Полная очистка дня: моя смена, производство и хронология."""
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM shifts WHERE date=?", (date_str,))
+        cur.execute("DELETE FROM production WHERE date=?", (date_str,))
+        cur.execute("DELETE FROM timeline WHERE date=?", (date_str,))
+        self.conn.commit()
 
     def get_shift(self, date_str):
         """Один день — вместо загрузки всего месяца ради модалки."""
@@ -288,12 +286,6 @@ class DBManager:
         row = cur.fetchone()
         return self._row_to_shift(row) if row else None
 
-    def _range_data(self, start, end):
-        cur = self.conn.cursor()
-        cur.execute(f"SELECT date, {self.SHIFT_FIELDS} FROM shifts "
-                    "WHERE date >= ? AND date < ?", (start, end))
-        return {r[0]: self._row_to_shift(r[1:]) for r in cur.fetchall()}
-
     @staticmethod
     def _month_bounds(year, month):
         start = f"{year}-{month:02d}-01"
@@ -301,20 +293,85 @@ class DBManager:
         end_month = 1 if month == 12 else month + 1
         return start, f"{end_year}-{end_month:02d}-01"
 
-    def get_month_data(self, year, month):
-        # Диапазон вместо LIKE — гарантированный range-scan по первичному ключу.
-        start, end = self._month_bounds(year, month)
-        return self._range_data(start, end)
-
-    def get_year_data(self, year):
-        return self._range_data(f"{year}-01-01", f"{year + 1}-01-01")
-
-    def get_all_shifts(self):
+    def _shifts_range(self, start, end):
         cur = self.conn.cursor()
-        cur.execute(f"SELECT date, {self.SHIFT_FIELDS} FROM shifts ORDER BY date")
-        return [(r[0], self._row_to_shift(r[1:])) for r in cur.fetchall()]
+        # Диапазон вместо LIKE — гарантированный range-scan по первичному ключу.
+        cur.execute(f"SELECT date, {self.SHIFT_FIELDS} FROM shifts "
+                    "WHERE date >= ? AND date < ?", (start, end))
+        return {r[0]: self._row_to_shift(r[1:]) for r in cur.fetchall()}
 
-    # ---------- ночной трекер ----------
+    def get_month_shifts(self, year, month):
+        start, end = self._month_bounds(year, month)
+        return self._shifts_range(start, end)
+
+    def get_year_shifts(self, year):
+        return self._shifts_range(f"{year}-01-01", f"{year + 1}-01-01")
+
+    # ==========================================
+    # ПРОИЗВОДСТВО ЗА НОЧЬ
+    # ==========================================
+    PRODUCTION_FIELDS = "operator, product1, weight1, product2, weight2"
+
+    @staticmethod
+    def _row_to_production(row):
+        return {"operator": row[0], "product1": row[1], "weight1": row[2],
+                "product2": row[3], "weight2": row[4]}
+
+    def save_production(self, date_str, operator, product1, weight1,
+                        product2, weight2):
+        """Если за ночь ничего не заполнено — запись удаляется, а не хранится пустой."""
+        if not operator and weight1 is None and weight2 is None:
+            self.delete_production(date_str)
+            return
+        cur = self.conn.cursor()
+        cur.execute("""
+            INSERT INTO production (date, operator, product1, weight1, product2, weight2)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date) DO UPDATE SET
+                operator=excluded.operator,
+                product1=excluded.product1,
+                weight1=excluded.weight1,
+                product2=excluded.product2,
+                weight2=excluded.weight2
+        """, (date_str, operator, product1, weight1, product2, weight2))
+        self.conn.commit()
+
+    def delete_production(self, date_str):
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM production WHERE date=?", (date_str,))
+        self.conn.commit()
+
+    def get_production(self, date_str):
+        cur = self.conn.cursor()
+        cur.execute(f"SELECT {self.PRODUCTION_FIELDS} FROM production WHERE date=?",
+                    (date_str,))
+        row = cur.fetchone()
+        return self._row_to_production(row) if row else None
+
+    def _production_range(self, start, end):
+        cur = self.conn.cursor()
+        cur.execute(f"SELECT date, {self.PRODUCTION_FIELDS} FROM production "
+                    "WHERE date >= ? AND date < ?", (start, end))
+        return {r[0]: self._row_to_production(r[1:]) for r in cur.fetchall()}
+
+    def get_month_production(self, year, month):
+        start, end = self._month_bounds(year, month)
+        return self._production_range(start, end)
+
+    def get_year_production(self, year):
+        return self._production_range(f"{year}-01-01", f"{year + 1}-01-01")
+
+    # ---------- выгрузка ----------
+    def get_all_dates(self):
+        """Все даты, по которым есть хоть что-то — для CSV-экспорта."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT date FROM shifts UNION SELECT date FROM production "
+                    "ORDER BY date")
+        return [r[0] for r in cur.fetchall()]
+
+    # ==========================================
+    # НОЧНОЙ ТРЕКЕР
+    # ==========================================
     def add_timeline_event(self, date_str, event_type, event_time):
         cur = self.conn.cursor()
         cur.execute("INSERT INTO timeline (date, event_time, event_type) VALUES (?, ?, ?)",
@@ -344,11 +401,6 @@ class DBManager:
                     (start, end))
         return {r[0] for r in cur.fetchall()}
 
-    def delete_timeline_event(self, event_id):
-        cur = self.conn.cursor()
-        cur.execute("DELETE FROM timeline WHERE id=?", (event_id,))
-        self.conn.commit()
-
     def delete_timeline_events(self, event_ids):
         """Пакетное удаление — вызывается один раз по кнопке «Сохранить»."""
         if not event_ids:
@@ -358,36 +410,28 @@ class DBManager:
                         [(event_id,) for event_id in event_ids])
         self.conn.commit()
 
-    # ---------- продукция ----------
+    # ==========================================
+    # КАТАЛОГ ПРОДУКЦИИ
+    # ==========================================
     def get_products(self):
         cur = self.conn.cursor()
-        cur.execute("SELECT name, norm FROM products ORDER BY name")
-        return [(r[0], float(r[1] or WEIGHT_NORM)) for r in cur.fetchall()]
+        cur.execute("SELECT name FROM products ORDER BY name")
+        return [r[0] for r in cur.fetchall()]
 
-    def get_product_names(self):
-        return [name for name, _norm in self.get_products()]
-
-    def get_product_norms(self):
-        return {name: norm for name, norm in self.get_products()}
-
-    def add_product(self, name, norm=WEIGHT_NORM):
+    def add_product(self, name):
         try:
             cur = self.conn.cursor()
-            cur.execute("INSERT INTO products (name, norm) VALUES (?, ?)", (name, norm))
+            cur.execute("INSERT INTO products (name) VALUES (?)", (name,))
             self.conn.commit()
             return True
         except sqlite3.IntegrityError:
             return False
 
-    def update_product_norm(self, name, norm):
-        cur = self.conn.cursor()
-        cur.execute("UPDATE products SET norm=? WHERE name=?", (norm, name))
-        self.conn.commit()
-
     def product_usage_count(self, name):
-        """Сколько смен ссылается на продукт — спрашиваем перед удалением."""
+        """Сколько ночей ссылается на продукт — спрашиваем перед удалением."""
         cur = self.conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM shifts WHERE product=?", (name,))
+        cur.execute("SELECT COUNT(*) FROM production WHERE product1=? OR product2=?",
+                    (name, name))
         return cur.fetchone()[0]
 
     def delete_product(self, name):
@@ -395,7 +439,9 @@ class DBManager:
         cur.execute("DELETE FROM products WHERE name=?", (name,))
         self.conn.commit()
 
-    # ---------- бэкап ----------
+    # ==========================================
+    # БЭКАП
+    # ==========================================
     def backup_to(self, target_path):
         """Безопасная копия с учётом WAL — через встроенный backup API."""
         target = sqlite3.connect(target_path)
