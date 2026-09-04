@@ -44,10 +44,11 @@ class SettingsView:
         self.error_text = ft.Text("", color="#fca5a5", size=12)
 
         self.control = ft.Column([
-            ft.Row([
+            # SafeArea: без неё стрелка «Назад» уезжает под системные часы
+            ft.SafeArea(content=ft.Row([
                 th.icon_button(ft.Icons.ARROW_BACK, on_click=self._back),
                 th.text("Настройки", size=18, weight=ft.FontWeight.BOLD),
-            ]),
+            ])),
 
             th.card(ft.Column([
                 th.text("Оплата", size=12, weight=ft.FontWeight.BOLD),
@@ -104,8 +105,13 @@ class SettingsView:
             ], spacing=10, tight=True)),
 
             self.error_text,
-            ft.OutlinedButton("Сменить PIN-код", on_click=self._change_pin, width=300),
-            ft.ElevatedButton("Сохранить", on_click=self._save, width=300),
+            # Колонка выровнена по левому краю, поэтому кнопки фиксированной
+            # ширины центрируем каждой своей строкой.
+            ft.Row([ft.OutlinedButton("Сменить PIN-код",
+                                      on_click=self._change_pin, width=300)],
+                   alignment=ft.MainAxisAlignment.CENTER),
+            ft.Row([ft.ElevatedButton("Сохранить", on_click=self._save, width=300)],
+                   alignment=ft.MainAxisAlignment.CENTER),
         ], spacing=14, scroll=ft.ScrollMode.AUTO, expand=True)
 
     # ---------- налог ----------
@@ -388,12 +394,3 @@ class SettingsView:
             self._read_number(self.norm1_field) or config["norm_shop1"],
             self._read_number(self.norm2_field) or config["norm_shop2"],
         )
-
-    def _back(self, e=None):
-        self._fallback_persist()
-        self.ctx.show_main()
-
-    def _change_pin(self, e=None):
-        # PIN не стираем заранее: старый хеш живёт до подтверждения нового
-        self._fallback_persist()
-        self.ctx.show_pin(force_setup=True)
