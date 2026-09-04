@@ -11,6 +11,8 @@ from exporter import backup_database, export_csv, find_backups, restore_database
 from views.common import (bind_event, confirm_dialog, info_dialog, safe_update,
                           sync_value)
 
+BACK_KEY_SIZE = 46
+
 
 class SettingsView:
     def __init__(self, ctx):
@@ -43,12 +45,20 @@ class SettingsView:
 
         self.error_text = ft.Text("", color="#fca5a5", size=12)
 
+        back_key = th.glass_key(
+            ft.Icon(ft.Icons.ARROW_BACK, size=20, color=th.color("text")),
+            self._back, size=BACK_KEY_SIZE)
+
         self.control = ft.Column([
             # SafeArea: без неё стрелка «Назад» уезжает под системные часы
-            ft.SafeArea(content=ft.Row([
-                th.icon_button(ft.Icons.ARROW_BACK, on_click=self._back),
-                th.text("Настройки", size=18, weight=ft.FontWeight.BOLD),
-            ])),
+            ft.SafeArea(content=ft.Container(
+                padding=ft.Padding.only(top=8, bottom=4),
+                content=ft.Row([
+                    back_key,
+                    th.text("Настройки", size=18, weight=ft.FontWeight.BOLD),
+                ], spacing=12,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            )),
 
             th.card(ft.Column([
                 th.text("Оплата", size=12, weight=ft.FontWeight.BOLD),
@@ -394,3 +404,12 @@ class SettingsView:
             self._read_number(self.norm1_field) or config["norm_shop1"],
             self._read_number(self.norm2_field) or config["norm_shop2"],
         )
+
+    def _back(self, e=None):
+        self._fallback_persist()
+        self.ctx.show_main()
+
+    def _change_pin(self, e=None):
+        # PIN не стираем заранее: старый хеш живёт до подтверждения нового
+        self._fallback_persist()
+        self.ctx.show_pin(force_setup=True)
