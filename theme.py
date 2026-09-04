@@ -12,6 +12,10 @@ TEXT_ROLES = {
     "faint": "text_faint",
 }
 
+# Радиальный градиент круглой кнопки: прозрачный в центре, светлеющий к краю.
+GLASS_KEY_COLORS = ["#0fffffff", "#14ffffff", "#3dffffff"]
+GLASS_KEY_STOPS = [0.0, 0.68, 1.0]
+
 
 def sync_value(e):
     """Flet не всегда пишет ввод в .value до потери фокуса — синхронизируем вручную.
@@ -31,6 +35,7 @@ class Theme:
         self._fields = []
         self._icons = []
         self._dividers = []
+        self._glass_keys = []
 
     # ==========================================
     # ЦВЕТА
@@ -100,7 +105,69 @@ class Theme:
         control.label_style = ft.TextStyle(color=self.color("text_dim"))
 
     # ==========================================
-    # СТЕКЛО
+    # СТЕКЛЯННАЯ КРУГЛАЯ КНОПКА
+    # ==========================================
+    def glass_key(self, content, on_press=None, size=68, animate=True):
+        """
+        Круглая кнопка «жидкого стекла»: реальный backdrop-блюр плюс
+        радиальный градиент, светлеющий к краю. Используется цифровой
+        клавиатурой PIN и круглыми кнопками навигации.
+        Настоящее преломление требует фрагментного шейдера, которого во Flet нет.
+        """
+        key = ft.Container(
+            width=size, height=size, border_radius=size // 2,
+            alignment=ft.Alignment.CENTER,
+            content=content,
+            ink=True,
+        )
+        if animate:
+            key.animate_scale = ft.Animation(90, ft.AnimationCurve.EASE_OUT)
+        self._glass_keys.append(key)
+        self._paint_glass_key(key)
+
+        if on_press is None:
+            return key
+
+        # Нажатие вешаем на GestureDetector ради «сжатия» кнопки; если в этой
+        # сборке Flet нет tap_down/tap_up — откатываемся на обычный on_click.
+        detector = ft.GestureDetector(content=key)
+        has_down = self._bind(detector, lambda e, k=key: self.squeeze(k, True),
+                              "on_tap_down")
+        has_up = self._bind(detector, lambda e, k=key, f=on_press:
+                            self._release(k, f), "on_tap_up")
+        if has_down and has_up:
+            return detector
+
+        key.on_click = lambda e, f=on_press: f()
+        return key
+
+    @staticmethod
+    def _bind(control, handler, name):
+        if hasattr(control, name):
+            setattr(control, name, handler)
+            return True
+        return False
+
+    def squeeze(self, key, pressed):
+        key.scale = 0.9 if pressed else 1.0
+        try:
+            key.update()
+        except Exception:
+            pass
+
+    def _release(self, key, action):
+        self.squeeze(key, False)
+        action()
+
+    def _paint_glass_key(self, key):
+        key.gradient = ft.RadialGradient(colors=list(GLASS_KEY_COLORS),
+                                         stops=list(GLASS_KEY_STOPS))
+        key.border = ft.Border.all(1, self.color("glass_border"))
+        key.blur = None if self.simple_bg() else ft.Blur(14, 14)
+        key.scale = 1.0
+
+    # ==========================================
+    # СТЕКЛО (карточки)
     # ==========================================
     def card(self, content, blur=False, **extra):
         """blur=True оставляем только для одной верхней карточки:
@@ -179,6 +246,9 @@ class Theme:
             card.bgcolor = pal["glass"]
             card.border = ft.Border.all(1, pal["glass_border"])
             card.blur = ft.Blur(18, 18) if (blur and not self.simple_bg()) else None
+
+        for key in self._glass_keys:
+            self._paint_glass_key(key)
 
         for control, role in self._texts:
             control.color = self._role_color(role)
