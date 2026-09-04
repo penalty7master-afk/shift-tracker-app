@@ -10,6 +10,7 @@ THEME_ACCENTS = {
     "Sunset Coral": "#fb9c8a",
     "Amber Gold": "#fbbf24",
     "Rose Quartz": "#f9a8d4",
+    "Pure White": "#f5f5f7",
 }
 
 DEFAULT_ACCENT = "Aurora Violet"
@@ -33,6 +34,7 @@ THEME_BACKGROUNDS = {
         "field_border": "#33ffffff",
         "cell_border": "#24ffffff",
         "weekend": "#14ffffff",
+        "nav": "#26ffffff",
     },
     "Тёмный графит": {
         "dark": True,
@@ -49,6 +51,7 @@ THEME_BACKGROUNDS = {
         "field_border": "#2affffff",
         "cell_border": "#1fffffff",
         "weekend": "#10ffffff",
+        "nav": "#1fffffff",
     },
     "Тёмная ночь": {
         "dark": True,
@@ -65,6 +68,7 @@ THEME_BACKGROUNDS = {
         "field_border": "#2affffff",
         "cell_border": "#1cffffff",
         "weekend": "#10ffffff",
+        "nav": "#1cffffff",
     },
     "Тёмный изумруд": {
         "dark": True,
@@ -81,6 +85,7 @@ THEME_BACKGROUNDS = {
         "field_border": "#2affffff",
         "cell_border": "#1fffffff",
         "weekend": "#10ffffff",
+        "nav": "#1fffffff",
     },
     "Светлая (день)": {
         "dark": False,
@@ -92,11 +97,12 @@ THEME_BACKGROUNDS = {
         "glass_border": "#1a000000",
         "text": "#101828",
         "text_dim": "#475467",
-        "text_faint": "#98a2b3",
+        "text_faint": "#667085",
         "field_bg": "#ccffffff",
         "field_border": "#26000000",
         "cell_border": "#1f000000",
         "weekend": "#0d000000",
+        "nav": "#26000000",
     },
 }
 
@@ -141,6 +147,9 @@ DEFAULT_NORM_SHOP2 = 2100.0
 
 # Максимально допустимая выработка при вводе (защита от опечаток)
 WEIGHT_MAX = 100000.0
+
+# Максимальная разовая выплата премии, ₽ (защита от опечаток)
+PREMIUM_PAY_MAX = 1000000.0
 
 # ---------- время прибытия ----------
 ARRIVAL_OPTIONS = ["До 20:00", "Буфер (до 20:15)", "Опоздание (до 20:30)"]
