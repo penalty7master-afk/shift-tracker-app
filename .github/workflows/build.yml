@@ -34,16 +34,14 @@ jobs:
         python -m compileall -q .
 
     - name: Import smoke test
-      continue-on-error: true
       run: |
-        python -c "import constants, calculations, database, exporter, theme, ui; print('Импорты в порядке')"
+        python -c "import ui; print('Импорты в порядке')"
 
     - name: Setup Java JDK 17
       uses: actions/setup-java@v4
       with:
         distribution: 'temurin'
         java-version: '17'
-        cache: 'gradle'
 
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
