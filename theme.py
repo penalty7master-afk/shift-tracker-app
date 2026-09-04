@@ -16,8 +16,24 @@ TEXT_ROLES = {
 GLASS_KEY_COLORS = ["#0fffffff", "#14ffffff", "#3dffffff"]
 GLASS_KEY_STOPS = [0.0, 0.68, 1.0]
 
+# Верхний блик карточки в режиме скорости — заменяет backdrop-blur.
+GLOSS_STOPS = [0.0, 0.5]
+
 # Имя свойства иконки различается между сборками Flet — ищем реальное.
 ICON_ATTRS = ("icon", "name", "value")
+
+
+def safe_update(control):
+    """
+    Точечное обновление вместо page.update(): контрол может быть ещё не
+    добавлен на страницу, и тогда update() бросает исключение.
+    Живёт здесь, а не в views/common, чтобы Theme мог им пользоваться
+    без обратного импорта (граф импортов остаётся линейным).
+    """
+    try:
+        control.update()
+    except Exception:
+        pass
 
 
 def sync_value(e):
@@ -52,6 +68,8 @@ class Theme:
         self._icons = []
         self._dividers = []
         self._glass_keys = []
+        # Подпись палитры: пока она не менялась, полная перекраска не нужна.
+        self._signature = None
 
     # ==========================================
     # ЦВЕТА
@@ -74,6 +92,7 @@ class Theme:
         return bool(self.palette().get("dark", True))
 
     def simple_bg(self):
+        """Режим скорости: без блюра, без сфер, без анимации переходов."""
         return bool(self.config.get("simple_bg"))
 
     def on_accent(self):
@@ -144,16 +163,17 @@ class Theme:
     # ==========================================
     def glass_key(self, content, on_press=None, size=68, animate=True):
         """
-        Круглая кнопка «жидкого стекла»: реальный backdrop-блюр плюс
-        радиальный градиент, светлеющий к краю. Используется цифровой
-        клавиатурой PIN и круглыми кнопками навигации.
-        Настоящее преломление требует фрагментного шейдера, которого во Flet нет.
+        Круглая кнопка «жидкого стекла»: радиальный градиент, светлеющий к краю.
+        Blur снят намеренно и в обоих режимах: под клавишами лежит гладкий
+        градиент, размывать там нечего, а 14 BackdropFilter на экране PIN
+        роняли частоту кадров. ink=False по той же причине — материаловский
+        ripple перерисовывал клавишу все 300 мс своей анимации.
         """
         key = ft.Container(
             width=size, height=size, border_radius=size // 2,
             alignment=ft.Alignment.CENTER,
             content=content,
-            ink=True,
+            ink=False,
         )
         if animate:
             key.animate_scale = ft.Animation(90, ft.AnimationCurve.EASE_OUT)
@@ -185,10 +205,7 @@ class Theme:
 
     def squeeze(self, key, pressed):
         key.scale = 0.9 if pressed else 1.0
-        try:
-            key.update()
-        except Exception:
-            pass
+        safe_update(key)
 
     def _release(self, key, action):
         self.squeeze(key, False)
@@ -198,28 +215,78 @@ class Theme:
         key.gradient = ft.RadialGradient(colors=list(GLASS_KEY_COLORS),
                                          stops=list(GLASS_KEY_STOPS))
         key.border = ft.Border.all(1, self.color("glass_border"))
-        key.blur = None if self.simple_bg() else ft.Blur(14, 14)
+        key.blur = None
         key.scale = 1.0
 
     # ==========================================
     # СТЕКЛО (карточки)
     # ==========================================
     def card(self, content, blur=False, **extra):
-        """blur=True оставляем только для одной верхней карточки:
-        backdrop-blur на Android — самая дорогая операция отрисовки."""
-        params = dict(
-            content=content,
-            bgcolor=self.color("glass"),
-            border=ft.Border.all(1, self.color("glass_border")),
-            border_radius=18,
-            padding=16,
-        )
-        if blur and not self.simple_bg():
-            params["blur"] = ft.Blur(18, 18)
+        """blur=True оставляем только для шапки и навигации: их всего две,
+        и в режиме «Максимум» это по карману даже слабому GPU."""
+        params = dict(content=content, border_radius=18, padding=16)
         params.update(extra)
         card = ft.Container(**params)
         self._cards.append((card, blur))
+        self._paint_card(card, blur)
         return card
+
+    def _gloss_gradient(self):
+        """
+        Верхний блик — замена блюра в режиме скорости. Градиент в Flutter
+        перекрывает bgcolor, поэтому цвет стекла включён нижним стопом.
+        """
+        top = "#33ffffff" if self.is_dark() else "#e6ffffff"
+        return ft.LinearGradient(
+            begin=ft.Alignment.TOP_CENTER, end=ft.Alignment.BOTTOM_CENTER,
+            colors=[top, self.color("glass")], stops=list(GLOSS_STOPS))
+
+    def _paint_card(self, card, blur):
+        pal = self.palette()
+        card.bgcolor = pal["glass"]
+        card.border = ft.Border.all(1, pal["glass_border"])
+        if self.simple_bg():
+            card.blur = None
+            card.gradient = self._gloss_gradient()
+        else:
+            card.gradient = None
+            card.blur = ft.Blur(18, 18) if blur else None
+
+    # ==========================================
+    # ПОЛОСА ПРОКРУТКИ
+    # ==========================================
+    def _scrollbar_theme(self):
+        """Тонкая полупрозрачная полоса вместо толстой системной.
+        Набор полей ScrollbarTheme отличается между сборками — пробуем
+        от полного к минимальному."""
+        cls = getattr(ft, "ScrollbarTheme", None)
+        if cls is None:
+            return None
+        variants = (
+            dict(thickness=4, interactive=False, thumb_visibility=True,
+                 track_visibility=False, radius=2,
+                 thumb_color=self.color("text_faint")),
+            dict(thickness=4, interactive=False,
+                 thumb_color=self.color("text_faint")),
+            dict(thickness=4, thumb_color=self.color("text_faint")),
+            dict(thickness=4),
+        )
+        for kwargs in variants:
+            try:
+                return cls(**kwargs)
+            except Exception:
+                continue
+        return None
+
+    def _make_page_theme(self):
+        seed = self.accent()
+        bar = self._scrollbar_theme()
+        if bar is not None:
+            try:
+                return ft.Theme(color_scheme_seed=seed, scrollbar_theme=bar)
+            except Exception:
+                pass
+        return ft.Theme(color_scheme_seed=seed)
 
     # ==========================================
     # ФОН
@@ -248,7 +315,7 @@ class Theme:
         colors = self._sphere_colors()
         for sphere, color in zip(spheres, colors):
             if self.simple_bg():
-                # режим экономии: сфер нет вообще, только градиент
+                # режим скорости: сфер нет вообще, только градиент
                 sphere.gradient = None
                 sphere.bgcolor = TRANSPARENT
                 sphere.visible = False
@@ -261,16 +328,33 @@ class Theme:
                 colors=[color, TRANSPARENT], stops=[0.0, 1.0]
             )
 
+    def refresh_background(self):
+        """Фон лежит в корневом Stack вне экранов, поэтому обычное обновление
+        экрана его не задевает — отсюда был баг «фон меняется не сразу»."""
+        for base, spheres in self._backgrounds:
+            safe_update(base)
+            for sphere in spheres:
+                safe_update(sphere)
+
     # ==========================================
     # ПРИМЕНЕНИЕ ТЕМЫ
     # ==========================================
     def apply(self, page):
         """
-        Перекрашивает уже созданные контролы на месте. Полный page.update()
-        сюда сознательно не входит: он сбрасывал прокрутку настроек наверх.
+        Перекрашивает уже созданные контролы на месте.
+        Возвращает True, если палитра действительно изменилась — тогда
+        вызывающему нужен page.update() ради page.bgcolor и page.theme.
+        При простой навигации между экранами возвращает False, и полный
+        диф всего дерева не отправляется.
         """
+        signature = (self.config.get("theme"), self.config.get("bg_theme"),
+                     self.simple_bg())
+        if signature == self._signature:
+            return False
+        self._signature = signature
+
         pal = self.palette()
-        page.theme = ft.Theme(color_scheme_seed=self.accent())
+        page.theme = self._make_page_theme()
         page.theme_mode = ft.ThemeMode.DARK if self.is_dark() else ft.ThemeMode.LIGHT
         page.bgcolor = pal["page"]
 
@@ -282,9 +366,7 @@ class Theme:
             self._paint_spheres(spheres)
 
         for card, blur in self._cards:
-            card.bgcolor = pal["glass"]
-            card.border = ft.Border.all(1, pal["glass_border"])
-            card.blur = ft.Blur(18, 18) if (blur and not self.simple_bg()) else None
+            self._paint_card(card, blur)
 
         for key in self._glass_keys:
             self._paint_glass_key(key)
@@ -300,3 +382,5 @@ class Theme:
 
         for control in self._dividers:
             control.color = pal["glass_border"]
+
+        return True
