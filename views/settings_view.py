@@ -8,8 +8,8 @@ from constants import (DEFAULT_ACCENT, DEFAULT_BG_THEME, SHOP1, SHOP2,
                        THEME_BACKGROUNDS, WEIGHT_MAX)
 from database import db
 from exporter import backup_database, export_csv, find_backups, restore_database
-from views.common import (bind_event, confirm_dialog, info_dialog, safe_update,
-                          sync_value)
+from views.common import (bind_event, confirm_dialog, info_dialog, refresh_tree,
+                          safe_update)
 
 BACK_KEY_SIZE = 46
 
@@ -19,6 +19,7 @@ class SettingsView:
         self.ctx = ctx
         self.page = ctx.page
         self.th = ctx.theme
+        self.pending_delete = None   # продукт, для которого показано подтверждение
         self._build()
 
     # ==========================================
@@ -50,13 +51,14 @@ class SettingsView:
             self._back, size=BACK_KEY_SIZE)
 
         self.control = ft.Column([
-            # SafeArea: без неё стрелка «Назад» уезжает под системные часы
+            # SafeArea: без неё стрелка «Назад» уезжает под системные часы.
+            # Отступ слева, чтобы кнопка не липла к краю экрана.
             ft.SafeArea(content=ft.Container(
-                padding=ft.Padding.only(top=8, bottom=4),
+                padding=ft.Padding.only(top=8, bottom=4, left=6),
                 content=ft.Row([
                     back_key,
                     th.text("Настройки", size=18, weight=ft.FontWeight.BOLD),
-                ], spacing=12,
+                ], spacing=14,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER),
             )),
 
@@ -100,7 +102,8 @@ class SettingsView:
 
             th.card(ft.Column([
                 th.text("Каталог продукции", size=12, weight=ft.FontWeight.BOLD),
-                th.text("Выбирается в дне отдельно для каждого цеха.",
+                th.text("Список сортируется по числу в названии: 90, 90 ПВ, "
+                        "200, 200 ПВ, 500, 500 ПВ, затем остальное.",
                         role="faint", size=10),
                 ft.Row([self.new_product_input, self.add_product_button], spacing=8),
                 th.divider(),
@@ -122,6 +125,9 @@ class SettingsView:
                    alignment=ft.MainAxisAlignment.CENTER),
             ft.Row([ft.ElevatedButton("Сохранить", on_click=self._save, width=300)],
                    alignment=ft.MainAxisAlignment.CENTER),
+            # Запас снизу: иначе кнопку «Сохранить» перекрывают системные
+            # кнопки навигации телефона.
+            ft.Container(height=90),
         ], spacing=14, scroll=ft.ScrollMode.AUTO, expand=True)
 
     # ---------- налог ----------
@@ -151,7 +157,7 @@ class SettingsView:
         for cell, rate in self.tax_cells:
             active = abs(rate - self.tax_value) < 0.0001
             cell.bgcolor = th.accent() if active else "#00000000"
-            cell.content.color = "#101014" if active else th.color("text")
+            cell.content.color = th.on_accent() if active else th.color("text")
             cell.content.weight = ft.FontWeight.BOLD if active else None
 
     # ---------- тема ----------
@@ -194,17 +200,27 @@ class SettingsView:
 
     def _select_accent(self, name):
         self.ctx.config["theme"] = name
-        self._paint_theme_selection()
-        self.ctx.apply_theme()
+        self._apply_and_stay()
 
     def _select_bg(self, name):
         self.ctx.config["bg_theme"] = name
-        self._paint_theme_selection()
-        self.ctx.apply_theme()
+        self._apply_and_stay()
 
     def _on_simple_bg(self, e=None):
         self.ctx.config["simple_bg"] = 1 if self.simple_bg_switch.value else 0
-        self.ctx.apply_theme()
+        self._apply_and_stay()
+
+    def _apply_and_stay(self):
+        """
+        Перекрашивает интерфейс, не сбрасывая прокрутку. Полный page.update()
+        отматывал настройки в начало при каждом выборе фона.
+        """
+        self.ctx.theme.apply(self.page)
+        self._paint_theme_selection()
+        self._paint_tax()
+        self._refresh_products()
+        refresh_tree(self.accent_row, self.bg_column, self.tax_row,
+                     self.products_list, self.control)
 
     def _paint_theme_selection(self):
         th = self.th
@@ -219,6 +235,7 @@ class SettingsView:
             selected = (name == current_bg)
             row.bgcolor = th.accent_a("33") if selected else "#00000000"
             row.border = ft.Border.all(1, th.accent()) if selected else None
+            label.color = th.color("text")
             label.weight = ft.FontWeight.BOLD if selected else None
 
     # ---------- продукция ----------
@@ -230,16 +247,49 @@ class SettingsView:
         self.products_list = ft.Column(spacing=4, tight=True)
 
     def _refresh_products(self):
+        """
+        Подтверждение удаления показывается прямо в строке, без диалога:
+        открытие AlertDialog заставляло страницу настроек прыгать наверх.
+        """
         th = self.th
         controls = []
         for name in db.get_products():
+            label = ft.Text(name, size=12, color=th.color("text"), expand=True)
+
+            if self.pending_delete == name:
+                used = db.product_usage_count(name)
+                caption = "Удалить?" if not used else f"Удалить? (в {used} ноч.)"
+                controls.append(ft.Row([
+                    ft.Text(caption, size=11, color="#fbbf24", expand=True),
+                    ft.TextButton("Да", on_click=lambda e, n=name: self._delete_product(n),
+                                  style=ft.ButtonStyle(color="#f87171")),
+                    ft.TextButton("Нет", on_click=lambda e: self._cancel_delete()),
+                ], spacing=2, vertical_alignment=ft.CrossAxisAlignment.CENTER))
+                continue
+
             controls.append(ft.Row([
-                ft.Text(name, size=12, color=th.color("text"), expand=True),
+                label,
                 ft.IconButton(ft.Icons.DELETE_OUTLINE, icon_color="#fca5a5",
                               icon_size=20,
-                              on_click=lambda e, n=name: self._confirm_delete_product(n)),
+                              on_click=lambda e, n=name: self._ask_delete(n)),
             ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER))
         self.products_list.controls = controls
+
+    def _ask_delete(self, name):
+        self.pending_delete = name
+        self._refresh_products()
+        safe_update(self.products_list)
+
+    def _cancel_delete(self):
+        self.pending_delete = None
+        self._refresh_products()
+        safe_update(self.products_list)
+
+    def _delete_product(self, name):
+        db.delete_product(name)
+        self.pending_delete = None
+        self._refresh_products()
+        safe_update(self.products_list)
 
     def _add_product(self, e=None):
         name = (self.new_product_input.value or "").strip()
@@ -250,23 +300,9 @@ class SettingsView:
             self.new_product_input.error_text = None
         else:
             self.new_product_input.error_text = "Такой продукт уже есть"
+        self.pending_delete = None
         self._refresh_products()
-        safe_update(self.products_list)
-        safe_update(self.new_product_input)
-
-    def _confirm_delete_product(self, name):
-        used = db.product_usage_count(name)
-        message = f"Продукт «{name}» будет удалён из каталога."
-        if used:
-            message += (f"\n\nОн указан в {used} ноч. — записи сохранятся, "
-                        "но будут ссылаться на удалённый продукт.")
-
-        def do_delete():
-            db.delete_product(name)
-            self._refresh_products()
-            safe_update(self.products_list)
-
-        confirm_dialog(self.ctx, "Удалить продукт?", message, do_delete)
+        refresh_tree(self.products_list, self.new_product_input)
 
     # ---------- данные ----------
     def _build_data(self):
@@ -341,6 +377,7 @@ class SettingsView:
         self.simple_bg_switch.value = bool(config["simple_bg"])
         self.error_text.value = ""
         self.new_product_input.error_text = None
+        self.pending_delete = None
         self._refresh_products()
         self.data_hint.value = ("CSV открывается в Excel. Бэкап — полная копия "
                                 "базы, её можно вернуть на любом устройстве.")
