@@ -2,7 +2,8 @@ import csv
 import os
 from datetime import datetime
 
-from calculations import format_hours, format_weight
+from calculations import format_hours
+from database import db
 
 # Порядок важен: сначала пробуем видимые пользователю папки,
 # в конце — приватное хранилище приложения как гарантированный запасной путь.
@@ -12,8 +13,9 @@ CANDIDATE_DIRS = [
     "/sdcard/Download",
 ]
 
-CSV_HEADER = ["Дата", "Статус", "Оператор", "Часы", "Праздничная",
-              "Время прибытия", "Продукт", "Выработка, кг", "Заметка"]
+CSV_HEADER = ["Дата", "Статус", "Часы", "Время прибытия", "Заметка",
+              "Оператор", "Цех 1 продукт", "Цех 1 кг",
+              "Цех 2 продукт", "Цех 2 кг"]
 
 
 def _writable(path):
@@ -45,29 +47,38 @@ def _stamp():
     return datetime.now().strftime("%Y%m%d_%H%M")
 
 
-def export_csv(shifts):
-    """shifts: список кортежей (date_str, shift_dict) из db.get_all_shifts()."""
+def _number(value):
+    return "" if value is None else f"{float(value):.0f}"
+
+
+def export_csv():
+    """Одна строка на дату: моя смена и производство рядом."""
     target = os.path.join(export_dir(), f"shifts_pro_{_stamp()}.csv")
+    dates = db.get_all_dates()
+
     # utf-8-sig — чтобы Excel не показывал кракозябры на русских заголовках
     with open(target, "w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle, delimiter=";")
         writer.writerow(CSV_HEADER)
-        for date_str, shift in shifts:
+        for date_str in dates:
+            shift = db.get_shift(date_str) or {}
+            record = db.get_production(date_str) or {}
             writer.writerow([
                 date_str,
                 shift.get("status") or "",
-                shift.get("operator") or "",
-                format_hours(shift.get("hours")),
-                "да" if shift.get("holiday") else "",
+                format_hours(shift.get("hours")) if shift.get("hours") else "",
                 shift.get("arrival_status") or "",
-                shift.get("product") or "",
-                format_weight(shift.get("weight")),
                 (shift.get("note") or "").replace("\n", " "),
+                record.get("operator") or "",
+                record.get("product1") or "",
+                _number(record.get("weight1")),
+                record.get("product2") or "",
+                _number(record.get("weight2")),
             ])
     return target
 
 
-def backup_database(db):
+def backup_database():
     target = os.path.join(export_dir(), f"shifts_pro_backup_{_stamp()}.db")
     db.backup_to(target)
     return target
@@ -96,6 +107,6 @@ def find_backups():
     return [path for _mtime, path in found]
 
 
-def restore_database(db, path):
+def restore_database(path):
     db.restore_from(path)
     return path
