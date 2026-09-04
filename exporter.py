@@ -13,8 +13,8 @@ CANDIDATE_DIRS = [
     "/sdcard/Download",
 ]
 
-CSV_HEADER = ["Дата", "Статус", "Часы", "Время прибытия", "Заметка",
-              "Оператор", "Цех 1 продукт", "Цех 1 кг",
+CSV_HEADER = ["Дата", "Статус", "Часы", "Время прибытия", "Премия выплачена",
+              "Заметка", "Оператор", "Цех 1 продукт", "Цех 1 кг",
               "Цех 2 продукт", "Цех 2 кг"]
 
 
@@ -68,6 +68,7 @@ def export_csv():
                 shift.get("status") or "",
                 format_hours(shift.get("hours")) if shift.get("hours") else "",
                 shift.get("arrival_status") or "",
+                _number(shift.get("premium_pay")),
                 (shift.get("note") or "").replace("\n", " "),
                 record.get("operator") or "",
                 record.get("product1") or "",
