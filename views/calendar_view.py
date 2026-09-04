@@ -8,7 +8,7 @@ from calculations import (format_hours, format_money, month_forecast,
                           op_names_from)
 from constants import (MONTH_NAMES, SHOP1, SHOP2, STATUS_COLORS, STATUS_WORK,
                        WEEKDAY_SHORT)
-from views.common import safe_update
+from views.common import refresh_tree, safe_update, set_icon
 from views.day_modal import show_day_modal
 
 WEEKS = 6
@@ -76,14 +76,16 @@ class CalendarView:
         self._build_forecast_card()
 
         self.control = ft.Column(
-            [month_row, swipeable, self.legend_row,
+            [month_row, swipeable, self.legend_card,
              self.premium_card, self.forecast_card],
             spacing=10, scroll=ft.ScrollMode.AUTO, expand=True,
         )
 
     def _make_cell(self):
         day_text = ft.Text("", size=14, weight=ft.FontWeight.BOLD)
-        op_text = ft.Text("", size=9)
+        op_text = ft.Text("", size=9, max_lines=1,
+                          overflow=ft.TextOverflow.ELLIPSIS,
+                          text_align=ft.TextAlign.CENTER)
         marks = ft.Row([
             ft.Icon(ft.Icons.ARROW_UPWARD, size=11, visible=False),
             ft.Icon(ft.Icons.ARROW_UPWARD, size=11, visible=False),
@@ -97,6 +99,7 @@ class CalendarView:
                               horizontal_alignment=ft.CrossAxisAlignment.CENTER),
             expand=1, height=CELL_HEIGHT, border_radius=10,
             alignment=ft.Alignment.CENTER,
+            padding=ft.Padding.symmetric(horizontal=2),
             on_click=self._on_cell_click,
         )
 
@@ -106,19 +109,20 @@ class CalendarView:
 
     def _build_legend(self):
         th = self.th
-        items = [
-            (ft.Icon(ft.Icons.ARROW_UPWARD, size=11, color=ARROW_UP), "цех 1"),
-            (ft.Icon(ft.Icons.ARROW_DOWNWARD, size=11, color=ARROW_DOWN), "цех 2"),
-            (ft.Container(width=6, height=6, border_radius=3, bgcolor=DOT_NOTE), "заметка"),
-            (ft.Container(width=6, height=6, border_radius=3, bgcolor=DOT_TRACKER), "хронология"),
+        rows = [
+            th.text("Значки в дне: первая стрелка — цех 1, вторая — цех 2. "
+                    "Вверх зелёная — норма выполнена, вниз красная — нет.",
+                    role="faint", size=10),
+            ft.Row([
+                ft.Container(width=6, height=6, border_radius=3, bgcolor=DOT_NOTE),
+                th.text("заметка", role="faint", size=10),
+                ft.Container(width=10),
+                ft.Container(width=6, height=6, border_radius=3, bgcolor=DOT_TRACKER),
+                th.text("хронология", role="faint", size=10),
+            ], spacing=5, tight=True),
         ]
-        controls = []
-        for mark, label in items:
-            controls.append(ft.Row([
-                mark, ft.Text(label, size=9, color=th.color("text_faint")),
-            ], spacing=4, tight=True))
-        self.legend_row = ft.Row(controls, spacing=12, wrap=True,
-                                 alignment=ft.MainAxisAlignment.CENTER)
+        self.legend_card = th.card(ft.Column(rows, spacing=6, tight=True),
+                                   padding=12)
 
     def _build_premium_card(self):
         th = self.th
@@ -170,7 +174,7 @@ class CalendarView:
     def refresh(self):
         year, month = self.ctx.view["year"], self.ctx.view["month"]
         shifts_data = self.ctx.month_data
-        production_data = getattr(self.ctx, "production_data", {})
+        production_data = self.ctx.production_data
         config = self.ctx.config
         ops = op_names_from(config)
         cycle_start = config.get("cycle_start")
@@ -228,7 +232,7 @@ class CalendarView:
         border_color = th.color("cell_border")
         border_width = 1
 
-        if shift:
+        if shift and shift.get("status"):
             status = shift.get("status")
             fill, stroke = STATUS_COLORS.get(status, (TRANSPARENT, None))
             if status == STATUS_WORK:
@@ -257,19 +261,19 @@ class CalendarView:
     def _paint_marks(self, marks, shift, record, norms, has_timeline):
         arrow1, arrow2, dot_note, dot_tracker = marks.controls
 
-        for arrow, key in ((arrow1, "weight1"), (arrow2, "weight2")):
-            shop = SHOP1 if key == "weight1" else SHOP2
+        for arrow, key, shop in ((arrow1, "weight1", SHOP1),
+                                 (arrow2, "weight2", SHOP2)):
             weight = (record or {}).get(key)
             if weight is None:
                 arrow.visible = False
                 continue
             arrow.visible = True
-            if float(weight) >= norms[shop]:
-                arrow.name = ft.Icons.ARROW_UPWARD
-                arrow.color = ARROW_UP
-            else:
-                arrow.name = ft.Icons.ARROW_DOWNWARD
-                arrow.color = ARROW_DOWN
+            above_norm = float(weight) >= norms[shop]
+            # set_icon вместо arrow.name: в Flet 0.86 присваивание .name
+            # молча создавало новый атрибут, и стрелка всегда смотрела вверх
+            set_icon(arrow, ft.Icons.ARROW_UPWARD if above_norm
+                     else ft.Icons.ARROW_DOWNWARD)
+            arrow.color = ARROW_UP if above_norm else ARROW_DOWN
 
         dot_note.visible = bool(shift and shift.get("note"))
         dot_note.bgcolor = DOT_NOTE
@@ -278,8 +282,11 @@ class CalendarView:
 
     @staticmethod
     def _short_name(name):
-        parts = (name or "").split()
-        return parts[-1] if parts else "—"
+        """
+        Имя показывается целиком. Раньше бралось последнее слово, и
+        «Макс Д» превращалось в «Д». Длинное имя обрезается многоточием.
+        """
+        return (name or "").strip() or "—"
 
     # ---------- премия и прогноз ----------
     def _refresh_premium(self, shifts_data, config):
@@ -302,10 +309,12 @@ class CalendarView:
 
     def _refresh_forecast(self, year, month, shifts_data, config, today):
         summary = month_summary(shifts_data, config)
-        self.fact_text.value = (
-            f"Факт: {summary['shifts']} смен · "
-            f"{format_hours(summary['total_hours'])} ч · "
-            f"на руки {format_money(summary['net'])}")
+        fact = (f"Факт: {summary['shifts']} смен · "
+                f"{format_hours(summary['total_hours'])} ч · "
+                f"на руки {format_money(summary['net'])}")
+        if summary["premium_paid"]:
+            fact += f" (в т.ч. премия {format_money(summary['premium_paid'])})"
+        self.fact_text.value = fact
 
         forecast = month_forecast(year, month, shifts_data, config, today)
         if forecast is None:
@@ -315,4 +324,4 @@ class CalendarView:
                 f"Если выйти во все оставшиеся {forecast['remaining']} дн.: "
                 f"{forecast['shifts']} смен, премия {forecast['premium_hours']} ч, "
                 f"на руки {format_money(forecast['net'])}")
-        safe_update(self.control)
+        refresh_tree(self.premium_card, self.forecast_card)
