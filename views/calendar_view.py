@@ -203,11 +203,17 @@ class CalendarView:
         day_text, op_text, marks = cell.content.controls
 
         if day == 0:
+            # Пустой слот остаётся в ряду: скрытая ячейка схлопывается,
+            # и оставшиеся шесть растягиваются на всю ширину сетки.
             cell.data = None
-            cell.visible = False
+            cell.bgcolor = TRANSPARENT
+            cell.border = None
+            day_text.value = ""
+            op_text.value = ""
+            for mark in marks.controls:
+                mark.visible = False
             return
 
-        cell.visible = True
         current = date(year, month, day)
         date_str = current.strftime("%Y-%m-%d")
         cell.data = date_str
