@@ -23,6 +23,7 @@ def main(page: ft.Page):
     config = db.get_config()
     theme = Theme(config)
     ctx = AppContext(page, config, theme)
+    ctx.production_data = {}
 
     now = datetime.now()
     ctx.view["year"], ctx.view["month"] = now.year, now.month
@@ -110,7 +111,8 @@ def main(page: ft.Page):
     def reload_month():
         """Единственное чтение месяца из БД — им пользуются все экраны."""
         year, month = ctx.view["year"], ctx.view["month"]
-        ctx.month_data = db.get_month_data(year, month)
+        ctx.month_data = db.get_month_shifts(year, month)
+        ctx.production_data = db.get_month_production(year, month)
         ctx.timeline_dates = db.get_timeline_dates(year, month)
         update_header()
         calendar_view.refresh()
