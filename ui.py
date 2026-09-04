@@ -12,6 +12,8 @@ from views.common import AppContext, refresh_tree
 from views.pin_view import PinView
 from views.settings_view import SettingsView
 
+SWITCHER_MS = 140
+
 
 # ==========================================
 # СБОРКА ПРИЛОЖЕНИЯ
@@ -47,10 +49,26 @@ def main(page: ft.Page):
     )
 
     # ---------- экраны ----------
+    # Аналитика и настройки строятся при первом показе. Раньше все четыре
+    # экрана создавались на старте и постоянно висели в дереве, участвуя
+    # в каждом дифе и в каждом пересчёте раскладки.
     calendar_view = CalendarView(ctx)
-    analytics_view = AnalyticsView(ctx)
-    settings_view = SettingsView(ctx)
     pin_view = PinView(ctx, on_success=lambda: show_main())
+    screens = {}
+
+    def get_analytics():
+        view = screens.get("analytics")
+        if view is None:
+            view = AnalyticsView(ctx)
+            screens["analytics"] = view
+        return view
+
+    def get_settings():
+        view = screens.get("settings")
+        if view is None:
+            view = SettingsView(ctx)
+            screens["settings"] = view
+        return view
 
     tab_holder = ft.Container(content=calendar_view.control, expand=True)
 
@@ -58,9 +76,10 @@ def main(page: ft.Page):
         if index == 0:
             tab_holder.content = calendar_view.control
         else:
-            tab_holder.content = analytics_view.control
+            analytics = get_analytics()
+            tab_holder.content = analytics.control
             if ctx.analytics_dirty:
-                analytics_view.refresh()
+                analytics.refresh()
                 ctx.analytics_dirty = False
         paint_nav(index)
         refresh_tree(tab_holder, nav_bar)
@@ -119,21 +138,41 @@ def main(page: ft.Page):
     # AnimatedSwitcher есть не во всех сборках: у обоих вариантов есть .content
     if hasattr(ft, "AnimatedSwitcher"):
         screen_holder = ft.AnimatedSwitcher(
-            content=ft.Container(), expand=True, duration=220,
+            content=ft.Container(), expand=True, duration=SWITCHER_MS,
             transition=ft.AnimatedSwitcherTransition.FADE,
         )
     else:
         screen_holder = ft.Container(expand=True)
 
-    def set_screen(control):
+    def sync_switcher():
+        """
+        В режиме скорости длительность обнуляется: анимация держит в дереве
+        сразу оба экрана и рисует их через слой прозрачности, а внутри них
+        лежит блюр — composite поверх composite на каждом кадре перехода.
+        """
+        if hasattr(screen_holder, "duration"):
+            screen_holder.duration = 0 if theme.simple_bg() else SWITCHER_MS
+
+    def set_screen(control, full=False):
         screen_holder.content = control
-        page.update()
+        # page.update() гоняет по сокету всё дерево (один календарь — это
+        # ~400 узлов), поэтому он остаётся только там, где реально менялись
+        # свойства самой страницы: bgcolor, theme, theme_mode.
+        if full:
+            page.update()
+        else:
+            refresh_tree(screen_holder)
 
     # ---------- данные ----------
     def apply_theme():
-        theme.apply(page)
+        changed = theme.apply(page)
         paint_nav(nav_state["index"])
-        page.update()
+        sync_switcher()
+        theme.refresh_background()
+        if changed:
+            page.update()
+        else:
+            refresh_tree(screen_holder)
 
     def update_header():
         summary = month_summary(ctx.month_data, config)
@@ -156,31 +195,40 @@ def main(page: ft.Page):
         update_header()
         calendar_view.refresh()
         ctx.analytics_dirty = True
-        if tab_holder.content is analytics_view.control:
-            analytics_view.refresh()
+        analytics = screens.get("analytics")
+        if analytics is not None and tab_holder.content is analytics.control:
+            analytics.refresh()
             ctx.analytics_dirty = False
 
     def refresh_after_change():
-        analytics_view.invalidate_year()
+        analytics = screens.get("analytics")
+        if analytics is not None:
+            analytics.invalidate_year()
         reload_month()
 
     # ---------- переходы ----------
     def show_pin(force_setup=False):
         pin_view.show(force_setup=force_setup)
-        theme.apply(page)
-        set_screen(pin_view.control)
+        changed = theme.apply(page)
+        sync_switcher()
+        set_screen(pin_view.control, full=changed)
 
     def show_main():
-        theme.apply(page)
+        changed = theme.apply(page)
         paint_nav(nav_state["index"])
-        analytics_view.invalidate_year()
+        sync_switcher()
+        analytics = screens.get("analytics")
+        if analytics is not None:
+            analytics.invalidate_year()
         reload_month()
-        set_screen(main_layout)
+        set_screen(main_layout, full=changed)
 
     def show_settings():
-        settings_view.load()
-        theme.apply(page)
-        set_screen(settings_view.control)
+        view = get_settings()
+        view.load()
+        changed = theme.apply(page)
+        sync_switcher()
+        set_screen(view.control, full=changed)
 
     ctx.show_pin = show_pin
     ctx.show_main = show_main
