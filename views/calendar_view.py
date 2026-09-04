@@ -199,7 +199,9 @@ class CalendarView:
 
         self._refresh_premium(shifts_data, config)
         self._refresh_forecast(year, month, shifts_data, config, today)
-        safe_update(self.control)
+        # Раньше уходила вся колонка: сетка + неизменная легенда + обе карточки,
+        # причём карточки повторно — их уже обновил _refresh_forecast.
+        refresh_tree(self.month_label, self.grid)
 
     def _paint_cell(self, cell, day, year, month, weekday, shifts_data,
                     production_data, ops, cycle_start, norms, timeline_dates, today):
