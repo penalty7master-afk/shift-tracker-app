@@ -1,9 +1,10 @@
 import calendar
+import re
 from datetime import date, datetime
 
 from constants import (ARRIVAL_OPTIONS, DEFAULT_CYCLE_START, EVENT_BREAK, EVENT_WORK,
                        FULL_SHIFT_HOURS, LATE_SHIFT_HOURS, PREMIUM_LADDER,
-                       SHOP1, SHOP2, SHOP_KEYS, STATUS_WORK)
+                       SHOP1, SHOP2, SHOP_KEYS, STATUS_PREMIUM_OFF, STATUS_WORK)
 
 
 # ==========================================
@@ -20,7 +21,34 @@ def format_hours(value):
 
 def format_weight(value):
     v = float(value or 0.0)
-    return f"{v:,.0f}".replace(",", " ") if abs(v - round(v)) < 0.01 else f"{v:,.1f}".replace(",", " ")
+    if abs(v - round(v)) < 0.01:
+        return f"{v:,.0f}".replace(",", " ")
+    return f"{v:,.1f}".replace(",", " ")
+
+
+# ==========================================
+# КАТАЛОГ ПРОДУКЦИИ
+# ==========================================
+_LEADING_NUMBER = re.compile(r"^\s*(\d+)")
+
+
+def product_sort_key(name):
+    """
+    Сортировка по числу в начале названия: 90, 90 ПВ, 200, 200 ПВ, 500, 500 ПВ.
+    Названия без числа (например «предпомол») уходят в конец по алфавиту.
+    """
+    text = (name or "").strip()
+    match = _LEADING_NUMBER.match(text)
+    if not match:
+        return (1, 0, text.lower())
+    number = int(match.group(1))
+    rest = text[match.end():].strip().lower()
+    # внутри одного числа: сначала без индекса, потом с индексом
+    return (0, number, rest)
+
+
+def sort_products(names):
+    return sorted(names, key=product_sort_key)
 
 
 # ==========================================
@@ -112,15 +140,24 @@ def month_summary(shifts_data, config):
     buffer_count = 0
     late = 0
     overslept = 0
+    premium_off = 0
+    premium_paid = 0.0     # фактически выплаченная премия за «выходной для премии»
 
     for shift in shifts_data.values():
         status = shift.get("status")
+
+        if status == STATUS_PREMIUM_OFF:
+            # Информационная отметка: в часы и в счётчик смен не идёт,
+            # но фактическая выплата учитывается в начислении.
+            premium_off += 1
+            premium_paid += float(shift.get("premium_pay") or 0.0)
+            continue
+
         if status != STATUS_WORK:
-            # "Выходной для премии" — только информационная отметка,
-            # в часы и в счётчик смен он сознательно не идёт.
-            from constants import STATUS_OVERSLEPT
-            if status == STATUS_OVERSLEPT:
-                overslept += 1
+            if status is not None and status != STATUS_WORK:
+                from constants import STATUS_OVERSLEPT
+                if status == STATUS_OVERSLEPT:
+                    overslept += 1
             continue
 
         shifts += 1
@@ -137,7 +174,7 @@ def month_summary(shifts_data, config):
     premium_hours = premium_hours_for(shifts)
     base_money = total_hours * hour_rate
     premium_money = premium_hours * hour_rate
-    gross = base_money + premium_money
+    gross = base_money + premium_money + premium_paid
     tax_money = gross * tax_rate
 
     return {
@@ -146,6 +183,8 @@ def month_summary(shifts_data, config):
         "premium_hours": premium_hours,
         "base_money": base_money,
         "premium_money": premium_money,
+        "premium_paid": premium_paid,
+        "premium_off": premium_off,
         "gross": gross,
         "tax_rate": tax_rate,
         "tax_money": tax_money,
@@ -181,7 +220,7 @@ def month_forecast(year, month, shifts_data, config, today=None):
     forecast_shifts = base["shifts"] + len(remaining)
     forecast_hours = base["total_hours"] + len(remaining) * FULL_SHIFT_HOURS
     forecast_premium = premium_hours_for(forecast_shifts)
-    gross = (forecast_hours + forecast_premium) * hour_rate
+    gross = ((forecast_hours + forecast_premium) * hour_rate) + base["premium_paid"]
 
     return {
         "remaining": len(remaining),
