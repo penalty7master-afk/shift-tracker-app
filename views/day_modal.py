@@ -13,13 +13,19 @@ from constants import (ARRIVAL_KEYS, DAY_STATUSES, EVENT_BREAK, EVENT_WORK,
 from database import db
 from views.common import (bind_event, close_dialog, confirm_dialog, dialog_height,
                           dialog_width, open_dialog, refresh_tree, release_focus,
-                          safe_update, sync_value, touch)
+                          safe_update, style_dialog, sync_value, touch)
 
 # Служебное значение выпадающего списка: день не отмечен как мой.
 STATUS_NONE = "— не отмечено —"
 
-WEIGHT_FIELD_WIDTH = 92          # хватает на 5 символов
+WEIGHT_FIELD_WIDTH = 96          # хватает на 5 символов
 PRODUCT_GAP = 8
+
+# Служебный ключ «продукция не выбрана». Пустая строка, а не None:
+# при value=None Flet не сбрасывал выбор на клиенте, и наименование
+# из предыдущего открытого дня молча уезжало в базу нового дня.
+PRODUCT_NONE = ""
+PRODUCT_NONE_LABEL = "— не выбрано —"
 
 _INSTANCE = {"modal": None}
 
@@ -120,7 +126,7 @@ class DayModal:
             vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
         self.content_holder = ft.Container(
-            padding=ft.Padding.only(top=10, left=4, right=4),
+            padding=ft.Padding.only(top=4),
             content=self.body,
         )
 
@@ -130,6 +136,7 @@ class DayModal:
             content=self.content_holder,
             actions=[self.actions_row],
         )
+        style_dialog(th, self.dialog)
 
     # ---------- блок «Моя смена» ----------
     def _build_my_shift(self):
@@ -257,8 +264,11 @@ class DayModal:
             # «Продукция» ломалось на четыре строки.
             product_dropdown = ft.Dropdown(
                 label="Продукция", options=[], dense=True, text_size=13,
-                width=self._product_width(),
+                value=PRODUCT_NONE, width=self._product_width(),
             )
+            bind_event(product_dropdown,
+                       lambda e, s=shop: self._on_product_change(e, s),
+                       "on_change", "on_select", "on_changed")
             weight_input = th.field(
                 label="кг", width=WEIGHT_FIELD_WIDTH, value="",
                 text_align=ft.TextAlign.RIGHT, dense=True, text_size=13,
@@ -289,8 +299,18 @@ class DayModal:
         self.production_block = ft.Column(rows, spacing=8, tight=True)
 
     def _product_width(self):
-        return max(150, dialog_width(self.page) - WEIGHT_FIELD_WIDTH
-                   - PRODUCT_GAP - 34)
+        """Ширина списка = ширина содержимого минус поле кг и зазор."""
+        return max(140, dialog_width(self.page) - WEIGHT_FIELD_WIDTH
+                   - PRODUCT_GAP - 4)
+
+    def _on_product_change(self, e=None, shop=None):
+        touch(self.ctx)
+        if e is not None and shop is not None:
+            # Flet 0.86 не всегда пишет выбор в .value до перерисовки
+            value = getattr(e, "data", None)
+            if value is not None:
+                self.shop_controls[shop]["product"].value = value
+        self.ctx.dialog_dirty = True
 
     # ==========================================
     # ОТКРЫТИЕ: перезаполнение готового дерева
@@ -302,7 +322,7 @@ class DayModal:
         self.saved_once = False
 
         self.products = db.get_products()
-        self.shift = db.get_shift(self.date_str)
+        self.shift = db.get_shift(self.date_str, self.mode)
         self.production = db.get_production(self.date_str, self.mode)
         self.saved_events = list(db.get_timeline(self.date_str, self.mode))
         self.pending_events = []
@@ -381,8 +401,12 @@ class DayModal:
                 product = None
             weight = record.get(weight_key)
 
-            slot["product"].options = [ft.dropdown.Option(p) for p in self.products]
-            slot["product"].value = product
+            # Служебная опция всегда первой: без неё сброс на «пусто»
+            # не доезжал до клиента и старый выбор оставался в поле.
+            slot["product"].options = (
+                [ft.dropdown.Option(key=PRODUCT_NONE, text=PRODUCT_NONE_LABEL)] +
+                [ft.dropdown.Option(p) for p in self.products])
+            slot["product"].value = product or PRODUCT_NONE
             slot["weight"].value = ("" if weight is None
                                     else format_weight(weight).replace(" ", ""))
             slot["weight"].error_text = None
@@ -548,6 +572,10 @@ class DayModal:
         self.error_text.value = ""
         return weights, premium_pay
 
+    def _product_of(self, shop):
+        value = self.shop_controls[shop]["product"].value
+        return value if value not in (None, PRODUCT_NONE) else None
+
     def _persist(self):
         collected = self._collect()
         if collected is False:
@@ -563,7 +591,7 @@ class DayModal:
             if note:
                 db.save_shift(self.date_str, 0.0, None, None, note, None, mode)
             else:
-                db.delete_shift(self.date_str)
+                db.delete_shift(self.date_str, mode)
         elif status == STATUS_WORK:
             db.save_shift(self.date_str, float(self.hours_slider.value), status,
                           ARRIVAL_KEYS[self.arrival_index], note, None, mode)
@@ -579,8 +607,8 @@ class DayModal:
         else:
             db.save_production(
                 self.date_str, self.operator_dropdown.value,
-                self.shop_controls[SHOP1]["product"].value, weights[SHOP1],
-                self.shop_controls[SHOP2]["product"].value, weights[SHOP2],
+                self._product_of(SHOP1), weights[SHOP1],
+                self._product_of(SHOP2), weights[SHOP2],
                 mode,
             )
 
@@ -605,7 +633,7 @@ class DayModal:
             return
 
         haptics.confirm()
-        self.shift = db.get_shift(self.date_str)
+        self.shift = db.get_shift(self.date_str, self.mode)
         self.production = db.get_production(self.date_str, self.mode)
         self.clear_button.visible = bool(self.shift or self.production
                                          or self.saved_events)
@@ -619,8 +647,9 @@ class DayModal:
                                  "можно продолжать ввод")
 
         self.ctx.refresh_after_change()
-        refresh_tree(self.saved_hint, self.actions_row,
-                     self.timeline_list, self.break_total, self.body)
+        refresh_tree(self.saved_hint, self.exit_button, self.clear_button,
+                     self.actions_row, self.timeline_list, self.break_total,
+                     self.body)
 
     def _exit(self, e=None):
         """Закрывает окно. Сохранённое остаётся в базе, последние
