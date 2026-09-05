@@ -89,14 +89,17 @@ def export_csv():
         writer = csv.writer(handle, delimiter=";")
         writer.writerow(CSV_HEADER)
         for date_str in dates:
-            shift = db.get_shift(date_str) or {}
-            shift_mode = shift.get("shift_mode") or MODE_NIGHT
-            rows = db.production_rows_for_export(date_str)
-            if not rows:
-                rows = [(shift_mode, {})]
+            rows = dict(db.production_rows_for_export(date_str))
+            # Смена и выработка теперь хранятся по каждому режиму отдельно,
+            # поэтому строка выгрузки собирается на каждый режим со своими
+            # данными, а не «одна смена + чужое производство».
+            modes = [m for m in (MODE_NIGHT, MODE_DAY)
+                     if m in rows or db.get_shift(date_str, m)]
 
-            for mode, record in rows:
-                own = (mode == shift_mode)
+            for mode in modes:
+                shift = db.get_shift(date_str, mode) or {}
+                record = rows.get(mode, {})
+                own = True
                 writer.writerow([
                     date_str,
                     MODE_CSV.get(mode, mode),
@@ -164,7 +167,7 @@ def export_pdf(year, month, config):
         pdf.set_font("Helvetica", size=10)
         text = _translit
 
-    shifts_data = db.get_month_shifts(year, month)
+    shifts_data = db.get_month_shifts(year, month, mode)
     production_data = db.get_month_production(year, month, mode)
     summary = month_summary(shifts_data, config)
 
