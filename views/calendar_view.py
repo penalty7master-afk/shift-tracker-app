@@ -8,11 +8,12 @@ from calculations import (format_hours, format_money, month_forecast,
                           op_names_from)
 from constants import (MONTH_NAMES, SHOP1, SHOP2, STATUS_COLORS, STATUS_WORK,
                        WEEKDAY_SHORT)
-from views.common import refresh_tree, safe_update, set_icon
+from views.common import refresh_tree, safe_update, set_icon, touch
 from views.day_modal import show_day_modal
 
 WEEKS = 6
 CELL_HEIGHT = 66
+MARKS_HEIGHT = 13          # строка значков занимает место всегда
 TRANSPARENT = "#00000000"
 
 ARROW_UP = "#6ee7b7"
@@ -62,9 +63,8 @@ class CalendarView:
             self.week_rows.append(row)
             self.grid.controls.append(row)
 
-        grid_card = th.card(self.grid, padding=10)
+        grid_card = th.card(self.grid, padding=10, stretch=False)
 
-        # свайп по календарю переключает месяц
         swipeable = ft.GestureDetector(
             content=grid_card,
             on_horizontal_drag_end=self._on_swipe,
@@ -92,8 +92,15 @@ class CalendarView:
             self._make_dot(),
             self._make_dot(),
         ], spacing=2, tight=True, alignment=ft.MainAxisAlignment.CENTER)
+
+        # Контейнер постоянной высоты: раньше строка значков появлялась и
+        # исчезала вместе со своей высотой, и число дня прыгало вверх
+        # относительно соседей по неделе.
+        marks_holder = ft.Container(content=marks, height=MARKS_HEIGHT,
+                                    alignment=ft.Alignment.CENTER)
+
         return ft.Container(
-            content=ft.Column([day_text, op_text, marks],
+            content=ft.Column([day_text, op_text, marks_holder],
                               spacing=1, tight=True,
                               alignment=ft.MainAxisAlignment.CENTER,
                               horizontal_alignment=ft.CrossAxisAlignment.CENTER),
@@ -139,14 +146,17 @@ class CalendarView:
         th = self.th
         self.fact_text = th.text("", role="dim", size=11)
         self.forecast_text = th.text("", role="dim", size=11)
+        self.compare_text = th.text("", role="faint", size=11)
         self.forecast_card = th.card(
-            ft.Column([self.fact_text, self.forecast_text], spacing=6, tight=True),
+            ft.Column([self.fact_text, self.forecast_text, self.compare_text],
+                      spacing=6, tight=True),
             padding=14)
 
     # ==========================================
     # НАВИГАЦИЯ
     # ==========================================
     def shift_month(self, delta):
+        touch(self.ctx)
         month = self.ctx.view["month"] + delta
         year = self.ctx.view["year"]
         if month < 1:
@@ -163,6 +173,7 @@ class CalendarView:
         self.shift_month(-1 if velocity > 0 else 1)
 
     def _on_cell_click(self, e):
+        touch(self.ctx)
         raw = e.control.data
         if not raw:
             return
@@ -199,18 +210,17 @@ class CalendarView:
 
         self._refresh_premium(shifts_data, config)
         self._refresh_forecast(year, month, shifts_data, config, today)
-        # Раньше уходила вся колонка: сетка + неизменная легенда + обе карточки,
-        # причём карточки повторно — их уже обновил _refresh_forecast.
+        # Раньше уходила вся колонка: сетка + неизменная легенда + обе
+        # карточки, причём карточки повторно.
         refresh_tree(self.month_label, self.grid)
 
     def _paint_cell(self, cell, day, year, month, weekday, shifts_data,
                     production_data, ops, cycle_start, norms, timeline_dates, today):
         th = self.th
-        day_text, op_text, marks = cell.content.controls
+        day_text, op_text, marks_holder = cell.content.controls
+        marks = marks_holder.content
 
         if day == 0:
-            # Пустой слот остаётся в ряду: скрытая ячейка схлопывается,
-            # и оставшиеся шесть растягиваются на всю ширину сетки.
             cell.data = None
             cell.bgcolor = TRANSPARENT
             cell.border = None
@@ -226,7 +236,6 @@ class CalendarView:
         shift = shifts_data.get(date_str)
         record = production_data.get(date_str)
 
-        # оператор из записи производства приоритетнее графика
         operator = (record or {}).get("operator") or get_operator_for_date(
             current, ops, cycle_start)
 
@@ -257,8 +266,7 @@ class CalendarView:
         op_text.value = self._short_name(operator)
         op_text.color = th.color("text_faint")
 
-        self._paint_marks(marks, shift, record, norms,
-                          date_str in timeline_dates)
+        self._paint_marks(marks, shift, record, norms, date_str in timeline_dates)
 
     def _paint_marks(self, marks, shift, record, norms, has_timeline):
         arrow1, arrow2, dot_note, dot_tracker = marks.controls
@@ -271,8 +279,6 @@ class CalendarView:
                 continue
             arrow.visible = True
             above_norm = float(weight) >= norms[shop]
-            # set_icon вместо arrow.name: в Flet 0.86 присваивание .name
-            # молча создавало новый атрибут, и стрелка всегда смотрела вверх
             set_icon(arrow, ft.Icons.ARROW_UPWARD if above_norm
                      else ft.Icons.ARROW_DOWNWARD)
             arrow.color = ARROW_UP if above_norm else ARROW_DOWN
@@ -284,10 +290,7 @@ class CalendarView:
 
     @staticmethod
     def _short_name(name):
-        """
-        Имя показывается целиком. Раньше бралось последнее слово, и
-        «Макс Д» превращалось в «Д». Длинное имя обрезается многоточием.
-        """
+        """Имя показывается целиком, длинное обрезается многоточием."""
         return (name or "").strip() or "—"
 
     # ---------- премия и прогноз ----------
@@ -326,4 +329,6 @@ class CalendarView:
                 f"Если выйти во все оставшиеся {forecast['remaining']} дн.: "
                 f"{forecast['shifts']} смен, премия {forecast['premium_hours']} ч, "
                 f"на руки {format_money(forecast['net'])}")
+
+        self.compare_text.value = self.ctx.compare_text or ""
         refresh_tree(self.premium_card, self.forecast_card)
