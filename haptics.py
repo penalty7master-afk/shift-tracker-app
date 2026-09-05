@@ -3,10 +3,14 @@
 шлёт команду во Flutter, который дёргает системный performHapticFeedback.
 Разрешение VIBRATE в манифесте не требуется.
 
-Всё завёрнуто в try/except: если в сборке Flet сервиса нет или системный
-виброотклик выключен пользователем в настройках телефона, приложение
-работает как обычно, просто молча.
+ВАЖНО: методы сервиса в Flet 0.86 асинхронные. Синхронный вызов возвращает
+корутину, которая никогда не выполняется — ошибки нет, вибрации тоже.
+Поэтому всё идёт через page.run_task().
+
+Если сервиса в сборке нет или системный виброотклик выключен в настройках
+телефона, приложение работает как обычно, просто молча.
 """
+import inspect
 import threading
 import time
 
@@ -15,11 +19,13 @@ import flet as ft
 # Пауза между толчками серии. Меньше 100 мс — толчки слипаются в один.
 PULSE_GAP = 0.12
 
-_state = {"service": None, "enabled": True}
+_state = {"service": None, "page": None, "enabled": True}
 
 
 def setup(page):
     """Регистрирует сервис на странице. Зовётся один раз при старте."""
+    _state["page"] = page
+
     cls = getattr(ft, "HapticFeedback", None)
     if cls is None:
         return False
@@ -39,6 +45,10 @@ def setup(page):
             return True
         except Exception:
             continue
+
+    # Держим ссылку даже без контейнера: в некоторых сборках сервис
+    # работает и без явной регистрации.
+    _state["service"] = service
     return False
 
 
@@ -57,8 +67,23 @@ def _fire(method):
     action = getattr(service, method, None)
     if action is None:
         return
+
+    page = _state["page"]
+    runner = getattr(page, "run_task", None) if page is not None else None
+    if runner is not None:
+        try:
+            runner(action)
+            return
+        except Exception:
+            pass
+
+    # Запасной путь для сборок без run_task.
     try:
-        action()
+        result = action()
+        if inspect.isawaitable(result):
+            # Цикла событий нет — закрываем корутину, иначе Python
+            # засорит лог предупреждением "never awaited".
+            result.close()
     except Exception:
         pass
 
@@ -102,7 +127,6 @@ def error(count=3, gap=PULSE_GAP):
     потоке заморозила бы интерфейс на всё время серии.
     Поток только шлёт команды сервису и не трогает дерево контролов.
     """
-    service = _state["service"]
-    if service is None or not _state["enabled"]:
+    if _state["service"] is None or not _state["enabled"]:
         return
     threading.Thread(target=_burst, args=(count, gap), daemon=True).start()
