@@ -78,6 +78,7 @@ THEME_BACKGROUNDS = {
         "gradient": ["#150e34", "#241a5c", "#123a66"],
         "spheres": ["#6693c5fd", "#55c9a6ff", "#556ee7b7"],
         "sphere_alpha": ["66", "55", "55"],
+        "dialog": "#f21b1440",
         "glass": "#1affffff",
         "glass_border": "#26ffffff",
         "text": "#ffffff",
@@ -95,6 +96,7 @@ THEME_BACKGROUNDS = {
         "gradient": ["#0d0d11", "#15151c", "#1c1c26"],
         "spheres": None,
         "sphere_alpha": ["2e", "24", "1c"],
+        "dialog": "#f2181820",
         "glass": "#14ffffff",
         "glass_border": "#1fffffff",
         "text": "#ffffff",
@@ -112,6 +114,7 @@ THEME_BACKGROUNDS = {
         "gradient": ["#070b12", "#0b1220", "#101a2b"],
         "spheres": None,
         "sphere_alpha": ["33", "26", "1f"],
+        "dialog": "#f20e1524",
         "glass": "#12ffffff",
         "glass_border": "#1cffffff",
         "text": "#ffffff",
@@ -129,6 +132,7 @@ THEME_BACKGROUNDS = {
         "gradient": ["#06120f", "#0a1c17", "#0e2620"],
         "spheres": None,
         "sphere_alpha": ["30", "26", "1e"],
+        "dialog": "#f20c1f1a",
         "glass": "#14ffffff",
         "glass_border": "#1fffffff",
         "text": "#ffffff",
@@ -142,20 +146,23 @@ THEME_BACKGROUNDS = {
     },
     "Светлая (день)": {
         "dark": False,
-        "page": "#eef1f7",
-        "gradient": ["#f6f8fc", "#e9eef8", "#dfe7f4"],
+        # Фон заметно холоднее и темнее карточек: раньше белое стекло
+        # сливалось с белым фоном, и границы карточек пропадали.
+        "page": "#dde3ee",
+        "gradient": ["#e4e9f3", "#d6deee", "#c9d5e8"],
         "spheres": None,
-        "sphere_alpha": ["40", "33", "26"],
-        "glass": "#b3ffffff",
-        "glass_border": "#1a000000",
-        "text": "#101828",
-        "text_dim": "#475467",
-        "text_faint": "#667085",
-        "field_bg": "#ccffffff",
-        "field_border": "#26000000",
-        "cell_border": "#1f000000",
-        "weekend": "#0d000000",
-        "nav": "#26000000",
+        "sphere_alpha": ["4d", "40", "33"],
+        "dialog": "#f7f7f9fd",
+        "glass": "#e6ffffff",
+        "glass_border": "#26000000",
+        "text": "#0f172a",
+        "text_dim": "#3f4a5f",
+        "text_faint": "#5b6577",
+        "field_bg": "#f2ffffff",
+        "field_border": "#33000000",
+        "cell_border": "#2b000000",
+        "weekend": "#14000000",
+        "nav": "#33000000",
     },
 }
 
@@ -199,6 +206,10 @@ SHOP_SHORT = {
 }
 
 SHOP_KEYS = [SHOP1, SHOP2]
+
+# Типовой каталог: добавляется вручную кнопкой в настройках.
+# PW латиницей заглавными — так наименования выглядят в журнале.
+DEFAULT_PRODUCTS = ["90", "90PW", "200", "200PW", "500", "500PW", "Предпомол"]
 
 DEFAULT_NORM_SHOP1 = 5900.0
 DEFAULT_NORM_SHOP2 = 2100.0
