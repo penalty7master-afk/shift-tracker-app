@@ -15,12 +15,18 @@ from views.settings_view import SettingsView
 
 # Анимация смены экрана выключена намеренно. AnimatedSwitcher держит в дереве
 # сразу оба экрана и рисует их через слой прозрачности — отсюда была
-# «заморозка» при входе в настройки и выходе из них: старый экран ещё виден,
-# новый уже проступает. Вкладки календарь/аналитика идут через обычный
-# Container и потому переключались мгновенно.
+# «заморозка» при входе в настройки и выходе из них.
 # Поставь True, чтобы вернуть плавный переход.
 USE_SCREEN_ANIMATION = False
 SWITCHER_MS = 140
+
+# Высота слоёв, лежащих поверх контента. Ровно на столько же отступают
+# распорки внутри прокрутки, иначе первая карточка окажется под шапкой.
+# Значения подобраны под экран 720p; правь здесь, если не сойдётся.
+HEADER_SPACE = 112
+NAV_SPACE = 76
+
+SIDE_PADDING = 10
 
 
 # ==========================================
@@ -60,17 +66,30 @@ def main(page: ft.Page):
     )
 
     # ---------- экраны ----------
-    # Аналитика и настройки строятся при первом показе. Раньше все четыре
-    # экрана создавались на старте и постоянно висели в дереве, участвуя
-    # в каждом дифе и в каждом пересчёте раскладки.
+    # Аналитика и настройки строятся при первом показе: раньше все четыре
+    # экрана висели в дереве постоянно и участвовали в каждом дифе.
     calendar_view = CalendarView(ctx)
     pin_view = PinView(ctx, on_success=lambda: show_main())
     screens = {}
+
+    def add_edge_spacers(control):
+        """
+        Пустые распорки внутри прокручиваемой колонки. Отступ должен жить
+        именно здесь, а не снаружи: если обрезать viewport padding'ом,
+        контент упрётся в границу и не сможет проехать под шапкой.
+        """
+        if not hasattr(control, "controls"):
+            return
+        control.controls.insert(0, ft.Container(height=HEADER_SPACE))
+        control.controls.append(ft.Container(height=NAV_SPACE))
+
+    add_edge_spacers(calendar_view.control)
 
     def get_analytics():
         view = screens.get("analytics")
         if view is None:
             view = AnalyticsView(ctx)
+            add_edge_spacers(view.control)
             screens["analytics"] = view
         return view
 
@@ -134,17 +153,26 @@ def main(page: ft.Page):
     )
     paint_nav(0)
 
-    main_layout = ft.Container(
-        expand=True, padding=10,
-        content=ft.Column([
-            ft.SafeArea(content=header_card),
-            tab_holder,
-            ft.SafeArea(content=ft.Container(
-                padding=ft.Padding.only(top=4),
-                content=ft.Row([nav_bar],
-                               alignment=ft.MainAxisAlignment.CENTER))),
-        ], expand=True, spacing=10),
-    )
+    # Stack вместо Column: контент лежит на всю высоту экрана, шапка и
+    # навигация — поверх него. Только так карточки проезжают под стеклом,
+    # и backdrop-blur получает что размывать. В Column слои не пересекались,
+    # и блюр размывал ровный градиент, то есть не давал ничего.
+    main_layout = ft.Stack([
+        ft.Container(
+            expand=True,
+            padding=ft.Padding.symmetric(horizontal=SIDE_PADDING),
+            content=tab_holder,
+        ),
+        ft.Container(
+            top=0, left=SIDE_PADDING, right=SIDE_PADDING,
+            content=ft.SafeArea(content=header_card),
+        ),
+        ft.Container(
+            bottom=0, left=SIDE_PADDING, right=SIDE_PADDING,
+            content=ft.SafeArea(content=ft.Row(
+                [nav_bar], alignment=ft.MainAxisAlignment.CENTER)),
+        ),
+    ], expand=True)
 
     # ---------- роутер ----------
     # У обоих вариантов держателя есть .content, остальной код от выбора
