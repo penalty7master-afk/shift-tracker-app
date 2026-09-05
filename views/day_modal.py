@@ -4,11 +4,12 @@ import flet as ft
 
 import haptics
 from calculations import (break_seconds, format_duration, format_weight,
-                          get_operator_for_date, hours_for_arrival,
-                          norm_for_shop, op_names_from)
-from constants import (ARRIVAL_LABELS, ARRIVAL_OPTIONS, DAY_STATUSES, EVENT_BREAK,
-                       EVENT_WORK, FULL_SHIFT_HOURS, PREMIUM_PAY_MAX, SHOP1, SHOP2,
-                       SHOP_TITLES, STATUS_PREMIUM_OFF, STATUS_WORK, WEIGHT_MAX)
+                          get_operator_for_date, hours_for_arrival, mode_of,
+                          norm_for_shop, normalize_arrival, op_names_from)
+from constants import (ARRIVAL_KEYS, DAY_STATUSES, EVENT_BREAK, EVENT_WORK,
+                       FULL_SHIFT_HOURS, PREMIUM_PAY_MAX, SHOP1, SHOP2,
+                       SHOP_TITLES, STATUS_PREMIUM_OFF, STATUS_WORK,
+                       WEIGHT_MAX, arrival_labels, term)
 from database import db
 from views.common import (bind_event, close_dialog, confirm_dialog, dialog_height,
                           dialog_width, open_dialog, refresh_tree, release_focus,
@@ -37,7 +38,8 @@ def show_day_modal(ctx, date_obj):
 
 
 def drop_day_modal():
-    """Сбрасывает кэш — например, после восстановления базы."""
+    """Сбрасывает кэш: после смены режима или восстановления базы дерево
+    нужно собрать заново с новыми подписями."""
     _INSTANCE["modal"] = None
 
 
@@ -45,7 +47,8 @@ class DayModal:
     """
     Два независимых блока:
       «Моя смена» — статус, приход, часы, трекер, заметка;
-      «Производство за ночь» — оператор и выработка цехов, доступно всегда.
+      «Производство за смену» — оператор и выработка цехов.
+    Все подписи берутся из term() и зависят от режима день/ночь.
     """
 
     def __init__(self, ctx):
@@ -53,6 +56,7 @@ class DayModal:
         self.page = ctx.page
         self.th = ctx.theme
         self.config = ctx.config
+        self.mode = mode_of(ctx.config)
 
         self.date_obj = None
         self.date_str = None
@@ -62,9 +66,10 @@ class DayModal:
         self.saved_events = []
         self.pending_events = []
         self.removed_ids = set()
-        self.saved_once = False       # после первого сохранения «Отмена» → «Выход»
+        self.saved_once = False
 
-        # Дерево модалки строится один раз и не регистрируется в теме.
+        # Дерево модалки строится один раз и не регистрируется в теме:
+        # иначе каждое открытие дня добавляло бы ссылки навсегда.
         self.th.begin_temp()
         try:
             self._build()
@@ -82,8 +87,9 @@ class DayModal:
 
         self.error_text = ft.Text("", color="#fca5a5", size=12)
         self.saved_hint = ft.Text("", color="#6ee7b7", size=11)
-
         self.title_text = th.text("", size=16, weight=ft.FontWeight.BOLD)
+        self.production_title = th.text(term(self.mode, "modal_production"),
+                                        size=12, weight=ft.FontWeight.BOLD)
 
         self.body = ft.Column([
             th.text("МОЯ СМЕНА", size=12, weight=ft.FontWeight.BOLD),
@@ -92,7 +98,7 @@ class DayModal:
             self.work_block,
             self.note_input,
             th.divider(),
-            th.text("ПРОИЗВОДСТВО ЗА НОЧЬ", size=12, weight=ft.FontWeight.BOLD),
+            self.production_title,
             self.production_block,
             self.error_text,
             self.saved_hint,
@@ -161,12 +167,15 @@ class DayModal:
 
         self._build_timeline()
 
+        self.tracker_title = th.text(term(self.mode, "tracker"),
+                                     size=12, weight=ft.FontWeight.BOLD)
+
         self.work_block = ft.Column([
             th.text("Время прибытия:", role="dim", size=11),
             self.arrival_row,
             th.text("Корректировка часов (ручная):", role="dim", size=11),
             self.hours_slider,
-            th.text("Трекер ночи (хронология):", size=12, weight=ft.FontWeight.BOLD),
+            self.tracker_title,
             self.break_total,
             ft.Row([
                 ft.ElevatedButton("+ Перекур",
@@ -182,7 +191,7 @@ class DayModal:
         self.arrival_index = 0
         self.arrival_cells = []
 
-        for position, (title, subtitle) in enumerate(ARRIVAL_LABELS):
+        for position, (title, subtitle) in enumerate(arrival_labels(self.mode)):
             cell = ft.Container(
                 expand=1, height=44, border_radius=9, padding=2,
                 alignment=ft.Alignment.CENTER,
@@ -204,9 +213,14 @@ class DayModal:
 
     def _paint_arrival(self):
         th = self.th
+        # Подписи времени меняются вместе с режимом: 20:00 -> 08:00
+        labels = arrival_labels(self.mode)
         for position, cell in enumerate(self.arrival_cells):
             active = position == self.arrival_index
+            title, subtitle = labels[position]
             cell.bgcolor = th.accent() if active else "#00000000"
+            cell.content.controls[0].value = title
+            cell.content.controls[1].value = subtitle
             cell.content.controls[0].color = (th.on_accent() if active
                                               else th.color("text"))
             cell.content.controls[1].color = (th.on_accent() if active
@@ -215,29 +229,32 @@ class DayModal:
     def _select_arrival(self, index):
         touch(self.ctx)
         self.arrival_index = index
-        self.hours_slider.value = hours_for_arrival(ARRIVAL_OPTIONS[index])
+        self.hours_slider.value = hours_for_arrival(ARRIVAL_KEYS[index])
         self.ctx.dialog_dirty = True
         haptics.select()
         self._paint_arrival()
         refresh_tree(self.arrival_row, self.hours_slider)
 
-    # ---------- блок «Производство за ночь» ----------
+    # ---------- блок «Производство» ----------
     def _build_production(self):
         th = self.th
 
-        self.operator_dropdown = ft.Dropdown(label="Оператор смены", options=[])
+        self.operator_dropdown = ft.Dropdown(
+            label=term(self.mode, "operator_label"), options=[])
 
         self.shop_controls = {}
-        rows = [
-            self.operator_dropdown,
-            th.text("По графику оператор подставляется сам, при подмене — измените.",
-                    role="faint", size=10),
-        ]
+        self.operator_hint = th.text(
+            "По графику оператор подставляется сам, при подмене — измените.",
+            role="faint", size=10)
+        self.shop2_hint = th.text(term(self.mode, "shop2_hint"),
+                                  role="faint", size=10)
+
+        rows = [self.operator_dropdown, self.operator_hint]
 
         for shop in (SHOP1, SHOP2):
-            # Ширина выпадающего списка считается от ширины окна: с expand
-            # внутри tight-колонки Flet отдавал ему почти нулевую ширину,
-            # и слово «Продукция» ломалось на четыре строки.
+            # Ширина списка считается от ширины окна: с expand внутри
+            # tight-колонки Flet отдавал ему почти нулевую ширину, и слово
+            # «Продукция» ломалось на четыре строки.
             product_dropdown = ft.Dropdown(
                 label="Продукция", options=[], dense=True, text_size=13,
                 width=self._product_width(),
@@ -248,9 +265,9 @@ class DayModal:
                 keyboard_type=ft.KeyboardType.NUMBER,
             )
             hint = th.text("", role="faint", size=11)
+            norm_text = th.text("", role="faint", size=10)
 
             weight_input.on_change = (lambda e, s=shop: self._on_weight_change(e, s))
-            norm_text = th.text("", role="faint", size=10)
 
             self.shop_controls[shop] = {
                 "product": product_dropdown, "weight": weight_input,
@@ -268,9 +285,7 @@ class DayModal:
                                vertical_alignment=ft.CrossAxisAlignment.START))
             rows.append(hint)
 
-        rows.append(th.text("Цех 2 работает не каждую ночь — оставьте поля пустыми, "
-                            "если линия не запускалась.", role="faint", size=10))
-
+        rows.append(self.shop2_hint)
         self.production_block = ft.Column(rows, spacing=8, tight=True)
 
     def _product_width(self):
@@ -281,17 +296,19 @@ class DayModal:
     # ОТКРЫТИЕ: перезаполнение готового дерева
     # ==========================================
     def open_for(self, date_obj):
+        self.mode = mode_of(self.config)
         self.date_obj = date_obj
         self.date_str = date_obj.strftime("%Y-%m-%d")
         self.saved_once = False
 
         self.products = db.get_products()
         self.shift = db.get_shift(self.date_str)
-        self.production = db.get_production(self.date_str)
-        self.saved_events = list(db.get_timeline(self.date_str))
+        self.production = db.get_production(self.date_str, self.mode)
+        self.saved_events = list(db.get_timeline(self.date_str, self.mode))
         self.pending_events = []
         self.removed_ids = set()
 
+        self._sync_mode_labels()
         self._load_my_shift()
         self._load_production()
         self._refresh_timeline()
@@ -303,14 +320,20 @@ class DayModal:
         self.clear_button.visible = bool(self.shift or self.production
                                          or self.saved_events)
 
-        width = dialog_width(self.page)
-        self.content_holder.width = width
+        self.content_holder.width = dialog_width(self.page)
         self.content_holder.height = dialog_height(self.page)
         for shop in (SHOP1, SHOP2):
             self.shop_controls[shop]["product"].width = self._product_width()
 
         self.ctx.dialog_dirty = False
         open_dialog(self.page, self.dialog, self.ctx)
+
+    def _sync_mode_labels(self):
+        """Все зависящие от режима подписи обновляются при каждом открытии."""
+        self.production_title.value = term(self.mode, "modal_production")
+        self.tracker_title.value = term(self.mode, "tracker")
+        self.shop2_hint.value = term(self.mode, "shop2_hint")
+        self.operator_dropdown.label = term(self.mode, "operator_label")
 
     def _load_my_shift(self):
         shift = self.shift or {}
@@ -321,11 +344,9 @@ class DayModal:
                                    else float(raw_hours))
         self.hours_slider.active_color = self.th.accent()
 
-        try:
-            self.arrival_index = ARRIVAL_OPTIONS.index(
-                shift.get("arrival_status") or ARRIVAL_OPTIONS[0])
-        except ValueError:
-            self.arrival_index = 0
+        # normalize_arrival переводит строки старых версий в ключи
+        key = normalize_arrival(shift.get("arrival_status"))
+        self.arrival_index = ARRIVAL_KEYS.index(key)
         self._paint_arrival()
 
         self.note_input.value = shift.get("note") or ""
@@ -345,7 +366,8 @@ class DayModal:
         saved_op = record.get("operator")
         if saved_op not in ops:
             saved_op = get_operator_for_date(self.date_obj, ops,
-                                             self.config.get("cycle_start"))
+                                             self.config.get("cycle_start"),
+                                             self.mode)
         self.operator_dropdown.options = [ft.dropdown.Option(o) for o in ops]
         self.operator_dropdown.value = saved_op
 
@@ -502,7 +524,7 @@ class DayModal:
         if not is_work:
             self.hours_slider.value = 0
         elif not initial and self.hours_slider.value == 0:
-            self.hours_slider.value = hours_for_arrival(ARRIVAL_OPTIONS[self.arrival_index])
+            self.hours_slider.value = hours_for_arrival(ARRIVAL_KEYS[self.arrival_index])
 
     # ==========================================
     # СОХРАНЕНИЕ
@@ -534,37 +556,40 @@ class DayModal:
 
         status = self.status_dropdown.value
         note = (self.note_input.value or "").strip() or None
+        mode = self.mode
 
         # ---- мой день ----
         if status == STATUS_NONE:
             if note:
-                db.save_shift(self.date_str, 0.0, None, None, note, None)
+                db.save_shift(self.date_str, 0.0, None, None, note, None, mode)
             else:
                 db.delete_shift(self.date_str)
         elif status == STATUS_WORK:
             db.save_shift(self.date_str, float(self.hours_slider.value), status,
-                          ARRIVAL_OPTIONS[self.arrival_index], note, None)
+                          ARRIVAL_KEYS[self.arrival_index], note, None, mode)
         elif status == STATUS_PREMIUM_OFF:
-            db.save_shift(self.date_str, 0.0, status, None, note, premium_pay)
+            db.save_shift(self.date_str, 0.0, status, None, note,
+                          premium_pay, mode)
         else:
-            db.save_shift(self.date_str, 0.0, status, None, note, None)
+            db.save_shift(self.date_str, 0.0, status, None, note, None, mode)
 
         # ---- производство ----
         if weights[SHOP1] is None and weights[SHOP2] is None:
-            db.delete_production(self.date_str)
+            db.delete_production(self.date_str, mode)
         else:
             db.save_production(
                 self.date_str, self.operator_dropdown.value,
                 self.shop_controls[SHOP1]["product"].value, weights[SHOP1],
                 self.shop_controls[SHOP2]["product"].value, weights[SHOP2],
+                mode,
             )
 
         # ---- трекер ----
         db.delete_timeline_events(self.removed_ids)
         if self.pending_events:
-            db.add_timeline_bulk(self.date_str, self.pending_events)
+            db.add_timeline_bulk(self.date_str, self.pending_events, mode)
         self.removed_ids = set()
-        self.saved_events = list(db.get_timeline(self.date_str))
+        self.saved_events = list(db.get_timeline(self.date_str, mode))
         self.pending_events = []
         self._refresh_timeline()
         return True
@@ -581,7 +606,7 @@ class DayModal:
 
         haptics.confirm()
         self.shift = db.get_shift(self.date_str)
-        self.production = db.get_production(self.date_str)
+        self.production = db.get_production(self.date_str, self.mode)
         self.clear_button.visible = bool(self.shift or self.production
                                          or self.saved_events)
         # После сохранения «Отмена» вводит в заблуждение: данные уже в базе,
@@ -598,7 +623,7 @@ class DayModal:
                      self.timeline_list, self.break_total, self.body)
 
     def _exit(self, e=None):
-        """Закрывает окно. Уже сохранённое остаётся в базе, последние
+        """Закрывает окно. Сохранённое остаётся в базе, последние
         несохранённые правки теряются — это и означает подпись кнопки."""
         touch(self.ctx)
         close_dialog(self.page, self.dialog, self.ctx)
@@ -607,13 +632,14 @@ class DayModal:
         touch(self.ctx)
 
         def do_delete():
-            db.delete_day(self.date_str)
+            db.delete_day(self.date_str, self.mode)
             close_dialog(self.page, self.dialog, self.ctx)
             self.ctx.refresh_after_change()
 
         confirm_dialog(
             self.ctx, "Очистить день?",
             f"За {self.date_obj.strftime('%d.%m.%Y')} будут удалены моя смена, "
-            "данные производства и хронология. Это необратимо.",
+            f"данные производства {term(self.mode, 'per_shift')} и хронология. "
+            "Это необратимо.",
             do_delete, confirm_label="Очистить",
         )
