@@ -2,11 +2,12 @@ import calendar
 import re
 from datetime import date, datetime
 
-from constants import (ARRIVAL_OPTIONS, DEFAULT_CYCLE_START, EVENT_BREAK,
-                       EVENT_MARK, EVENT_WORK, FULL_SHIFT_HOURS,
-                       LATE_SHIFT_HOURS, PREMIUM_LADDER, SHOP1, SHOP2,
-                       SHOP_KEYS, STATUS_OVERSLEPT, STATUS_PREMIUM_OFF,
-                       STATUS_WORK)
+from constants import (ARRIVAL_BUFFER, ARRIVAL_KEYS, ARRIVAL_LATE,
+                       ARRIVAL_ON_TIME, DEFAULT_CYCLE_START, DEFAULT_SHIFT_MODE,
+                       EVENT_BREAK, EVENT_MARK, EVENT_WORK, FULL_SHIFT_HOURS,
+                       LATE_SHIFT_HOURS, LEGACY_ARRIVAL, MODE_DAY, MODE_NIGHT,
+                       PREMIUM_LADDERS, SHOP1, SHOP2, SHOP_KEYS,
+                       STATUS_OVERSLEPT, STATUS_PREMIUM_OFF, STATUS_WORK)
 
 
 # ==========================================
@@ -34,14 +35,38 @@ def format_weight(value):
 
 
 # ==========================================
+# РЕЖИМ СМЕНЫ
+# ==========================================
+def mode_of(config):
+    value = (config or {}).get("shift_mode")
+    return value if value in (MODE_NIGHT, MODE_DAY) else DEFAULT_SHIFT_MODE
+
+
+def is_day_mode(config):
+    return mode_of(config) == MODE_DAY
+
+
+def hour_rate_of(config):
+    """
+    Ставка своя для каждого режима. Разные ключи конфига намеренно:
+    уточнение дневных условий не должно задевать ночные расчёты.
+    """
+    key = "day_hour_rate" if is_day_mode(config) else "hour_rate"
+    return float((config or {}).get(key) or 0.0)
+
+
+def ladder_of(config):
+    return PREMIUM_LADDERS.get(mode_of(config), PREMIUM_LADDERS[MODE_NIGHT])
+
+
+# ==========================================
 # КАТАЛОГ ПРОДУКЦИИ
 # ==========================================
 _LEADING_NUMBER = re.compile(r"^\s*(\d+)")
 
 
 def product_sort_key(name):
-    """Сортировка по числу в начале названия: 90, 90 ПВ, 200, 200 ПВ.
-    Названия без числа уходят в конец по алфавиту."""
+    """Сортировка по числу в начале названия: 90, 90 ПВ, 200, 200 ПВ."""
     text = (name or "").strip()
     match = _LEADING_NUMBER.match(text)
     if not match:
@@ -56,7 +81,7 @@ def sort_products(names):
 
 
 # ==========================================
-# ГРАФИК ОПЕРАТОРОВ (одна ночь через три)
+# ГРАФИК ОПЕРАТОРОВ
 # ==========================================
 def parse_cycle_start(value):
     try:
@@ -65,19 +90,36 @@ def parse_cycle_start(value):
         return datetime.strptime(DEFAULT_CYCLE_START, "%Y-%m-%d").date()
 
 
-def get_operator_for_date(date_obj, op_names, cycle_start=None):
-    """Каждый оператор выходит раз в четыре ночи."""
+def get_operator_for_date(date_obj, op_names, cycle_start=None, mode=None):
+    """
+    Цикл на четыре дня: день -> ночь -> отсыпной -> выходной.
+    Кто работает днём сегодня, выходит в ночь завтра, поэтому дневная
+    сетка сдвинута относительно ночной ровно на сутки. cycle_start
+    по-прежнему привязан к ночи — старые настройки остаются верными.
+    """
     base = parse_cycle_start(cycle_start)
-    return op_names[(date_obj - base).days % 4]
+    offset = 1 if (mode or DEFAULT_SHIFT_MODE) == MODE_DAY else 0
+    return op_names[(date_obj - base).days + offset & 3]
 
 
 def op_names_from(config):
     return [config.get(f"op{i}") for i in range(1, 5)]
 
 
-def hours_for_arrival(arrival_value):
-    """До 20:00 и Буфер -> полная смена. Опоздание -> минус один час."""
-    return LATE_SHIFT_HOURS if arrival_value == ARRIVAL_OPTIONS[2] else FULL_SHIFT_HOURS
+# ==========================================
+# ВРЕМЯ ПРИБЫТИЯ
+# ==========================================
+def normalize_arrival(value):
+    """Строка из старых версий -> ключ. Уже ключ -> сам ключ."""
+    if value in ARRIVAL_KEYS:
+        return value
+    return LEGACY_ARRIVAL.get(value, ARRIVAL_ON_TIME)
+
+
+def hours_for_arrival(arrival_key):
+    """Вовремя и Буфер -> полная смена. Опоздание -> минус один час."""
+    return (LATE_SHIFT_HOURS if normalize_arrival(arrival_key) == ARRIVAL_LATE
+            else FULL_SHIFT_HOURS)
 
 
 def month_dates(year, month):
@@ -97,30 +139,30 @@ def norm_for_shop(shop_key, config):
 # ==========================================
 # ПРЕМИЯ
 # ==========================================
-def premium_hours_for(shifts):
+def premium_hours_for(shifts, ladder):
     result = 0
-    for threshold, hours in PREMIUM_LADDER:
+    for threshold, hours in ladder:
         if shifts >= threshold:
             result = hours
     return result
 
 
-def next_premium_step(shifts):
-    """(порог, часов_премии, сколько_смен_осталось) или None."""
-    for threshold, hours in PREMIUM_LADDER:
+def next_premium_step(shifts, ladder):
+    """(порог, часов премии, сколько смен осталось) или None."""
+    for threshold, hours in ladder:
         if shifts < threshold:
             return threshold, hours, threshold - shifts
     return None
 
 
-def premium_progress(shifts):
+def premium_progress(shifts, ladder):
     """Доля 0..1 до следующей ступени — для полосы прогресса."""
-    step = next_premium_step(shifts)
+    step = next_premium_step(shifts, ladder)
     if step is None:
         return 1.0
     threshold = step[0]
     previous = 0
-    for t, _h in PREMIUM_LADDER:
+    for t, _h in ladder:
         if t < threshold:
             previous = t
     span = threshold - previous
@@ -134,8 +176,9 @@ def premium_progress(shifts):
 # ==========================================
 def month_summary(shifts_data, config):
     """Считает по уже загруженному словарю смен месяца."""
-    hour_rate = float(config.get("hour_rate") or 0.0)
+    hour_rate = hour_rate_of(config)
     tax_rate = float(config.get("tax_rate") or 0.0)
+    ladder = ladder_of(config)
 
     total_hours = 0.0
     shifts = 0
@@ -150,8 +193,7 @@ def month_summary(shifts_data, config):
         status = shift.get("status")
 
         if status == STATUS_PREMIUM_OFF:
-            # Информационная отметка: в часы и в счётчик смен не идёт,
-            # но фактическая выплата учитывается в начислении.
+            # В часы и в счётчик смен не идёт, но выплата учитывается.
             premium_off += 1
             premium_paid += float(shift.get("premium_pay") or 0.0)
             continue
@@ -164,15 +206,15 @@ def month_summary(shifts_data, config):
         shifts += 1
         total_hours += float(shift.get("hours") or 0.0)
 
-        arrival = shift.get("arrival_status") or ARRIVAL_OPTIONS[0]
-        if arrival == ARRIVAL_OPTIONS[2]:
+        arrival = normalize_arrival(shift.get("arrival_status"))
+        if arrival == ARRIVAL_LATE:
             late += 1
-        elif arrival == ARRIVAL_OPTIONS[1]:
+        elif arrival == ARRIVAL_BUFFER:
             buffer_count += 1
         else:
             on_time += 1
 
-    premium_hours = premium_hours_for(shifts)
+    premium_hours = premium_hours_for(shifts, ladder)
     base_money = total_hours * hour_rate
     premium_money = premium_hours * hour_rate
     gross = base_money + premium_money + premium_paid
@@ -194,8 +236,8 @@ def month_summary(shifts_data, config):
         "buffer": buffer_count,
         "late": late,
         "overslept": overslept,
-        "next_step": next_premium_step(shifts),
-        "progress": premium_progress(shifts),
+        "next_step": next_premium_step(shifts, ladder),
+        "progress": premium_progress(shifts, ladder),
     }
 
 
@@ -211,12 +253,13 @@ def month_forecast(year, month, shifts_data, config, today=None):
         return None
 
     base = month_summary(shifts_data, config)
-    hour_rate = float(config.get("hour_rate") or 0.0)
+    hour_rate = hour_rate_of(config)
     tax_rate = float(config.get("tax_rate") or 0.0)
+    ladder = ladder_of(config)
 
     forecast_shifts = base["shifts"] + len(remaining)
     forecast_hours = base["total_hours"] + len(remaining) * FULL_SHIFT_HOURS
-    forecast_premium = premium_hours_for(forecast_shifts)
+    forecast_premium = premium_hours_for(forecast_shifts, ladder)
     gross = ((forecast_hours + forecast_premium) * hour_rate) + base["premium_paid"]
 
     return {
@@ -285,9 +328,14 @@ def production_summary(production_data, config, only_dates=None):
 
 
 def operator_stats(production_data, config):
-    """Выработка по каждому оператору в разбивке по цехам."""
+    """
+    Выработка по операторам. Данные приходят уже отфильтрованными по
+    режиму: дневная и ночная выработка хранятся отдельными записями,
+    поэтому цифры не смешиваются.
+    """
     names = op_names_from(config)
     cycle_start = config.get("cycle_start")
+    mode = mode_of(config)
     stats = {name: {"nights": 0,
                     SHOP1: {"nights": 0, "total": 0.0, "avg": 0.0},
                     SHOP2: {"nights": 0, "total": 0.0, "avg": 0.0}}
@@ -300,7 +348,7 @@ def operator_stats(production_data, config):
                 d = datetime.strptime(date_str, "%Y-%m-%d").date()
             except ValueError:
                 continue
-            owner = get_operator_for_date(d, names, cycle_start)
+            owner = get_operator_for_date(d, names, cycle_start, mode)
         row = stats[owner]
         counted = False
         for shop, (_product, weight) in shop_values(record).items():
@@ -333,10 +381,7 @@ def year_summaries(year_shifts, config):
 
 
 def year_heatmap(year, year_shifts):
-    """
-    Данные годовой карты: список месяцев, в каждом — список дней
-    (число, статус). Статус None означает, что день не отмечен.
-    """
+    """Список месяцев, в каждом — список дней (число, статус)."""
     months = []
     for month in range(1, 13):
         days = []
@@ -349,7 +394,7 @@ def year_heatmap(year, year_shifts):
 
 
 # ==========================================
-# НОЧНОЙ ТРЕКЕР
+# ТРЕКЕР СМЕНЫ
 # ==========================================
 def _to_seconds(hhmmss):
     try:
@@ -361,8 +406,9 @@ def _to_seconds(hhmmss):
 
 def break_seconds(events):
     """
-    Суммарная длительность перекуров.
-    Перекур закрывается ближайшим следующим событием «Работа».
+    Суммарная длительность перекуров. Перекур закрывается ближайшим
+    следующим событием «Работа». Переход через полночь учитывается —
+    в дневном режиме он просто не наступает.
     """
     total = 0
     opened = None
@@ -375,7 +421,7 @@ def break_seconds(events):
             opened = seconds
         elif event_type == EVENT_WORK and opened is not None:
             delta = seconds - opened
-            if delta < 0:                 # переход через полночь
+            if delta < 0:
                 delta += 24 * 3600
             total += delta
             opened = None
@@ -394,10 +440,7 @@ def parse_mark(event_type):
 
 
 def output_curve(events):
-    """
-    Кривая выработки за ночь: [(минуты от старта, кг, темп кг/ч)].
-    Строится по событиям «Отметка N», где N — накопленные килограммы.
-    """
+    """Кривая выработки за смену: [(минуты от старта, кг, темп кг/ч)]."""
     points = []
     for item in events:
         event_time, event_type = item[-2], item[-1]
@@ -416,7 +459,7 @@ def output_curve(events):
     prev_seconds, prev_weight = points[0]
     for seconds, weight in points:
         elapsed = seconds - start
-        if elapsed < 0:                   # переход через полночь
+        if elapsed < 0:
             elapsed += 24 * 3600
         gap = seconds - prev_seconds
         if gap < 0:
