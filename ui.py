@@ -2,6 +2,7 @@ from datetime import datetime
 
 import flet as ft
 
+import haptics
 from calculations import format_hours, format_money, month_summary
 from constants import MONTH_NAMES
 from database import db
@@ -12,6 +13,13 @@ from views.common import AppContext, refresh_tree
 from views.pin_view import PinView
 from views.settings_view import SettingsView
 
+# Анимация смены экрана выключена намеренно. AnimatedSwitcher держит в дереве
+# сразу оба экрана и рисует их через слой прозрачности — отсюда была
+# «заморозка» при входе в настройки и выходе из них: старый экран ещё виден,
+# новый уже проступает. Вкладки календарь/аналитика идут через обычный
+# Container и потому переключались мгновенно.
+# Поставь True, чтобы вернуть плавный переход.
+USE_SCREEN_ANIMATION = False
 SWITCHER_MS = 140
 
 
@@ -21,6 +29,9 @@ SWITCHER_MS = 140
 def main(page: ft.Page):
     page.title = "КАЛЕНДАРЬ СМЕН PRO"
     page.padding = 0
+
+    # Виброотклик: сервис регистрируется один раз, дальше зовётся из экранов.
+    haptics.setup(page)
 
     config = db.get_config()
     theme = Theme(config)
@@ -73,6 +84,7 @@ def main(page: ft.Page):
     tab_holder = ft.Container(content=calendar_view.control, expand=True)
 
     def on_tab_change(index):
+        haptics.select()
         if index == 0:
             tab_holder.content = calendar_view.control
         else:
@@ -135,8 +147,9 @@ def main(page: ft.Page):
     )
 
     # ---------- роутер ----------
-    # AnimatedSwitcher есть не во всех сборках: у обоих вариантов есть .content
-    if hasattr(ft, "AnimatedSwitcher"):
+    # У обоих вариантов держателя есть .content, остальной код от выбора
+    # не зависит.
+    if USE_SCREEN_ANIMATION and hasattr(ft, "AnimatedSwitcher"):
         screen_holder = ft.AnimatedSwitcher(
             content=ft.Container(), expand=True, duration=SWITCHER_MS,
             transition=ft.AnimatedSwitcherTransition.FADE,
@@ -145,11 +158,7 @@ def main(page: ft.Page):
         screen_holder = ft.Container(expand=True)
 
     def sync_switcher():
-        """
-        В режиме скорости длительность обнуляется: анимация держит в дереве
-        сразу оба экрана и рисует их через слой прозрачности, а внутри них
-        лежит блюр — composite поверх composite на каждом кадре перехода.
-        """
+        """В режиме скорости анимация экранов гасится полностью."""
         if hasattr(screen_holder, "duration"):
             screen_holder.duration = 0 if theme.simple_bg() else SWITCHER_MS
 
