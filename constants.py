@@ -2,9 +2,64 @@
 # КОНСТАНТЫ, ПАЛИТРЫ И СПРАВОЧНИКИ
 # ==========================================
 
+# ---------- режим смены ----------
+MODE_NIGHT = "night"
+MODE_DAY = "day"
+SHIFT_MODES = [MODE_NIGHT, MODE_DAY]
+DEFAULT_SHIFT_MODE = MODE_NIGHT
+
+MODE_TITLES = {
+    MODE_NIGHT: "Ночные смены",
+    MODE_DAY: "Дневные смены",
+}
+
+MODE_SUBTITLES = {
+    MODE_NIGHT: "с 20:00 до 08:00",
+    MODE_DAY: "с 08:00 до 20:00",
+}
+
+# Все зависящие от режима слова собраны здесь, чтобы не искать их
+# потом по всему коду и не забыть очередную надпись.
+TERMS = {
+    MODE_NIGHT: {
+        "shift": "ночь",
+        "shift_gen": "ночи",
+        "per_shift": "за ночь",
+        "per_shift_caps": "ЗА НОЧЬ",
+        "shifts_short": "ноч.",
+        "production_title": "ПРОИЗВОДСТВО ЗА МЕСЯЦ",
+        "production_hint_all": "По всем ночам, включая мои выходные.",
+        "production_hint_mine": "Только ночи, в которые я был на смене.",
+        "tracker": "Трекер ночи (хронология):",
+        "modal_production": "ПРОИЗВОДСТВО ЗА НОЧЬ",
+        "shop2_hint": ("Цех 2 работает не каждую ночь — оставьте поля пустыми, "
+                       "если линия не запускалась."),
+        "operator_label": "Оператор ночной смены",
+    },
+    MODE_DAY: {
+        "shift": "день",
+        "shift_gen": "дня",
+        "per_shift": "за день",
+        "per_shift_caps": "ЗА ДЕНЬ",
+        "shifts_short": "дн.",
+        "production_title": "ПРОИЗВОДСТВО ЗА МЕСЯЦ",
+        "production_hint_all": "По всем дневным сменам, включая мои выходные.",
+        "production_hint_mine": "Только дни, в которые я был на смене.",
+        "tracker": "Трекер смены (хронология):",
+        "modal_production": "ПРОИЗВОДСТВО ЗА ДЕНЬ",
+        "shop2_hint": ("Цех 2 работает не каждую смену — оставьте поля пустыми, "
+                       "если линия не запускалась."),
+        "operator_label": "Оператор дневной смены",
+    },
+}
+
+
+def term(mode, key):
+    """Подпись, зависящая от режима. Неизвестный режим — считаем ночным."""
+    return TERMS.get(mode or DEFAULT_SHIFT_MODE, TERMS[MODE_NIGHT]).get(key, "")
+
+
 # ---------- акцентные цвета ----------
-# Шестая кнопка в настройках открывает палитру: выбранный HEX пишется
-# прямо в config["theme"], поэтому список здесь — только пресеты.
 THEME_ACCENTS = {
     "Aurora Violet": "#c9a6ff",
     "Emerald Mint": "#6ee7b7",
@@ -121,7 +176,6 @@ STATUS_COLORS = {
     STATUS_OVERSLEPT: ("#4df44336", "#b3f44336"),
 }
 
-# Цвета квадратов годовой тепловой карты
 HEATMAP_COLORS = {
     STATUS_WORK: None,                  # None -> акцентный цвет темы
     STATUS_PREMIUM_OFF: "#4caf50",
@@ -152,9 +206,58 @@ DEFAULT_NORM_SHOP2 = 2100.0
 WEIGHT_MAX = 100000.0
 PREMIUM_PAY_MAX = 1000000.0
 
-# ---------- время прибытия ----------
-ARRIVAL_OPTIONS = ["До 20:00", "Буфер (до 20:15)", "Опоздание (до 20:30)"]
-ARRIVAL_LABELS = [("Вовремя", "до 20:00"), ("Буфер", "до 20:15"), ("Опоздание", "до 20:30")]
+# ==========================================
+# ВРЕМЯ ПРИБЫТИЯ
+# ==========================================
+# В базу пишется ключ, а не подпись: иначе при смене режима все ранее
+# сохранённые дни («До 20:00») перестали бы опознаваться, и статистика
+# прихода обнулилась бы.
+ARRIVAL_ON_TIME = "on_time"
+ARRIVAL_BUFFER = "buffer"
+ARRIVAL_LATE = "late"
+
+ARRIVAL_KEYS = [ARRIVAL_ON_TIME, ARRIVAL_BUFFER, ARRIVAL_LATE]
+
+ARRIVAL_TIMES = {
+    MODE_NIGHT: {
+        ARRIVAL_ON_TIME: "до 20:00",
+        ARRIVAL_BUFFER: "до 20:15",
+        ARRIVAL_LATE: "до 20:30",
+    },
+    MODE_DAY: {
+        ARRIVAL_ON_TIME: "до 08:00",
+        ARRIVAL_BUFFER: "до 08:15",
+        ARRIVAL_LATE: "до 08:30",
+    },
+}
+
+ARRIVAL_NAMES = {
+    ARRIVAL_ON_TIME: "Вовремя",
+    ARRIVAL_BUFFER: "Буфер",
+    ARRIVAL_LATE: "Опоздание",
+}
+
+# Значения из версий до появления режимов — переводятся при чтении.
+LEGACY_ARRIVAL = {
+    "До 20:00": ARRIVAL_ON_TIME,
+    "Буфер (до 20:15)": ARRIVAL_BUFFER,
+    "Опоздание (до 20:30)": ARRIVAL_LATE,
+}
+
+
+def arrival_labels(mode):
+    """[(название, время)] для переключателя в модалке."""
+    times = ARRIVAL_TIMES.get(mode or DEFAULT_SHIFT_MODE, ARRIVAL_TIMES[MODE_NIGHT])
+    return [(ARRIVAL_NAMES[key], times[key]) for key in ARRIVAL_KEYS]
+
+
+def arrival_full(mode, key):
+    """«Вовремя (до 08:00)» — для выгрузок и подписей."""
+    times = ARRIVAL_TIMES.get(mode or DEFAULT_SHIFT_MODE, ARRIVAL_TIMES[MODE_NIGHT])
+    if key not in ARRIVAL_NAMES:
+        return ""
+    return f"{ARRIVAL_NAMES[key]} ({times[key]})"
+
 
 FULL_SHIFT_HOURS = 11.0
 LATE_SHIFT_HOURS = 10.0
@@ -170,15 +273,34 @@ DEFAULT_TAX = 0.0
 
 
 def tax_label(rate):
-    """Подпись налоговой ставки по её числовому значению."""
     for name, value in TAX_OPTIONS:
         if abs(value - float(rate or 0.0)) < 0.0001:
             return name
     return f"{float(rate) * 100:g} %"
 
 
-# ---------- премия ----------
-PREMIUM_LADDER = [(17, 9), (19, 12), (21, 16), (23, 18), (24, 20), (25, 21)]
+# ==========================================
+# ПРЕМИЯ
+# ==========================================
+# (минимальное число смен, часов премии). Ищется наибольший порог <= смен.
+NIGHT_PREMIUM_LADDER = [(17, 9), (19, 12), (21, 16), (23, 18), (24, 20), (25, 21)]
+
+# Дневная лестница пока копия ночной: точные пороги ещё уточняются.
+# Список отдельный намеренно — правка дневных значений не заденет ночные.
+DAY_PREMIUM_LADDER = [(17, 9), (19, 12), (21, 16), (23, 18), (24, 20), (25, 21)]
+
+PREMIUM_LADDERS = {
+    MODE_NIGHT: NIGHT_PREMIUM_LADDER,
+    MODE_DAY: DAY_PREMIUM_LADDER,
+}
+
+# Совместимость со старым именем
+PREMIUM_LADDER = NIGHT_PREMIUM_LADDER
+
+# ---------- ставки ----------
+DEFAULT_HOUR_RATE = 632.0
+# Дневная смена: 5885 ₽ за 11 часов.
+DEFAULT_DAY_HOUR_RATE = round(5885.0 / FULL_SHIFT_HOURS, 2)
 
 # ---------- прочее ----------
 MONTH_NAMES = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
@@ -189,14 +311,15 @@ MONTH_SHORT = ["Янв", "Фев", "Мар", "Апр", "Май", "Июн",
 
 WEEKDAY_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
+# Дата, от которой отсчитывается ротация. Привязана к НОЧНОЙ смене:
+# в этот день Оператор 1 выходит в ночь. Дневная сетка сдвинута на сутки.
 DEFAULT_CYCLE_START = "2026-09-01"
 
-# Типы событий ночного трекера
+# Типы событий трекера
 EVENT_BREAK = "Перекур"
 EVENT_WORK = "Работа"
-EVENT_MARK = "Отметка"          # промежуточный замер выработки
+EVENT_MARK = "Отметка"
 
 # ---------- автоблокировка ----------
-# Через столько секунд бездействия приложение снова спросит PIN.
 LOCK_TIMEOUT_SECONDS = 300
 LOCK_CHECK_INTERVAL = 15
