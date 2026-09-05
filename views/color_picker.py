@@ -6,10 +6,15 @@ import colorsys
 import flet as ft
 
 from views.common import (close_dialog, dialog_width, open_dialog, refresh_tree,
-                          safe_update)
+                          safe_update, style_dialog)
 
 HUE_STEPS = 30
 PREVIEW_SIZE = 64
+
+# Flutter резервирует по краям Slider место под «пятно» нажатия, поэтому
+# трек короче контейнера. Тем же отступом поджимаем радужную шкалу —
+# иначе она заметно длиннее ползунка под ней.
+SLIDER_INSET = 14
 
 
 def hsv_to_hex(hue, sat, val):
@@ -65,20 +70,28 @@ class ColorPicker:
         self.hex_label = th.text(self.current_hex().upper(), role="dim", size=13)
 
         # Радужная шкала: подсказка, какому положению ползунка какой тон
+        # Container с отступами вместо margin: набор фабрик у ft.Margin
+        # отличается между сборками Flet, а вложенный Container есть везде.
         self.hue_strip = ft.Container(
-            height=14, border_radius=7,
-            content=ft.Row([
-                ft.Container(expand=1, bgcolor=hsv_to_hex(i * 360 / HUE_STEPS, 0.62, 1.0))
-                for i in range(HUE_STEPS)
-            ], spacing=0),
+            padding=ft.Padding.symmetric(horizontal=SLIDER_INSET),
+            content=ft.Container(
+                height=14, border_radius=7,
+                content=ft.Row([
+                    ft.Container(expand=1,
+                                 bgcolor=hsv_to_hex(i * 360 / HUE_STEPS, 0.62, 1.0))
+                    for i in range(HUE_STEPS)
+                ], spacing=0),
+            ),
         )
 
+        # expand: без него слайдер получал ширину по своему минимуму и
+        # висел узкой полоской посреди окна.
         self.hue_slider = ft.Slider(min=0, max=359, value=self.hue,
-                                    on_change=self._on_hue)
+                                    expand=True, on_change=self._on_hue)
         self.sat_slider = ft.Slider(min=0, max=100, value=self.sat * 100,
-                                    on_change=self._on_sat)
+                                    expand=True, on_change=self._on_sat)
         self.val_slider = ft.Slider(min=25, max=100, value=self.val * 100,
-                                    on_change=self._on_val)
+                                    expand=True, on_change=self._on_val)
 
         body = ft.Column([
             ft.Row([self.preview, ft.Column([
@@ -88,11 +101,11 @@ class ColorPicker:
                 vertical_alignment=ft.CrossAxisAlignment.CENTER),
             th.text("Тон", role="dim", size=11),
             self.hue_strip,
-            self.hue_slider,
+            ft.Row([self.hue_slider], spacing=0),
             th.text("Насыщенность", role="dim", size=11),
-            self.sat_slider,
+            ft.Row([self.sat_slider], spacing=0),
             th.text("Яркость", role="dim", size=11),
-            self.val_slider,
+            ft.Row([self.val_slider], spacing=0),
         ], spacing=8, tight=True, scroll=ft.ScrollMode.HIDDEN)
 
         self.dialog = ft.AlertDialog(
@@ -104,6 +117,7 @@ class ColorPicker:
                 ft.TextButton("Применить", on_click=self._accept),
             ],
         )
+        style_dialog(th, self.dialog)
 
     def current_hex(self):
         return hsv_to_hex(self.hue, self.sat, self.val)
