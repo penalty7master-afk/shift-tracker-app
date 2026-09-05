@@ -3,10 +3,11 @@ from datetime import datetime
 import flet as ft
 
 import haptics
-from calculations import format_weight
-from constants import (DEFAULT_ACCENT, DEFAULT_BG_THEME, SHOP1, SHOP2,
-                       SHOP_TITLES, TAX_OPTIONS, THEME_ACCENTS,
-                       THEME_BACKGROUNDS, WEIGHT_MAX)
+from calculations import format_weight, is_day_mode, mode_of
+from constants import (DEFAULT_ACCENT, DEFAULT_BG_THEME, MODE_DAY, MODE_NIGHT,
+                       MODE_SUBTITLES, MODE_TITLES, SHOP1, SHOP2, SHOP_TITLES,
+                       TAX_OPTIONS, THEME_ACCENTS, THEME_BACKGROUNDS,
+                       WEIGHT_MAX, term)
 from database import db
 from exporter import (backup_database, export_csv, export_pdf, find_backups,
                       restore_database)
@@ -32,9 +33,12 @@ class SettingsView:
     def _build(self):
         th = self.th
 
+        self._build_mode()
+
         self.rate_field = th.field(label="Стоимость 1 часа оклада (₽)",
                                    keyboard_type=ft.KeyboardType.NUMBER)
         bind_event(self.rate_field, self._validate_rate, "on_blur")
+        self.rate_hint = th.text("", role="faint", size=10)
 
         # Имена операторов по центру ячейки
         self.op_fields = [th.field(label=f"Оператор {i}", expand=True,
@@ -43,6 +47,7 @@ class SettingsView:
 
         self.cycle_field = th.field(label="Старт графика (ГГГГ-ММ-ДД)")
         bind_event(self.cycle_field, self._validate_cycle, "on_blur")
+        self.cycle_hint = th.text("", role="faint", size=10)
 
         self.norm1_field = th.field(label=SHOP_TITLES[SHOP1], expand=True,
                                     keyboard_type=ft.KeyboardType.NUMBER)
@@ -50,6 +55,7 @@ class SettingsView:
                                     keyboard_type=ft.KeyboardType.NUMBER)
         bind_event(self.norm1_field, self._validate_norms, "on_blur")
         bind_event(self.norm2_field, self._validate_norms, "on_blur")
+        self.norm_title = th.text("", size=12, weight=ft.FontWeight.BOLD)
 
         self._build_tax()
         self._build_theme()
@@ -73,15 +79,21 @@ class SettingsView:
             )),
 
             th.card(ft.Column([
+                th.text("Режим работы", size=12, weight=ft.FontWeight.BOLD),
+                self.mode_row,
+                self.mode_hint,
+            ], spacing=10, tight=True)),
+
+            th.card(ft.Column([
                 th.text("Оплата", size=12, weight=ft.FontWeight.BOLD),
                 self.rate_field,
+                self.rate_hint,
                 th.text("Налог с начисленного", role="dim", size=11),
                 self.tax_row,
             ], spacing=10, tight=True)),
 
             th.card(ft.Column([
-                th.text("Нормы выработки за ночь, кг", size=12,
-                        weight=ft.FontWeight.BOLD),
+                self.norm_title,
                 self.norm1_field,
                 self.norm2_field,
             ], spacing=10, tight=True)),
@@ -91,9 +103,7 @@ class SettingsView:
                 ft.Row([self.op_fields[0], self.op_fields[1]], spacing=8),
                 ft.Row([self.op_fields[2], self.op_fields[3]], spacing=8),
                 self.cycle_field,
-                th.text("Операторы работают одну ночь через три. Укажите любую дату, "
-                        "в которую выходил Оператор 1 — от неё считается ротация.",
-                        role="faint", size=10),
+                self.cycle_hint,
             ], spacing=10, tight=True)),
 
             th.card(ft.Column([
@@ -128,13 +138,89 @@ class SettingsView:
             ft.Row([ft.OutlinedButton("Сменить PIN-код",
                                       on_click=self._change_pin, width=300)],
                    alignment=ft.MainAxisAlignment.CENTER),
-            # «Готово» вместо «Сохранить»: акцент, фон и каталог пишутся
-            # сразу, а ставка, нормы, операторы и налог — только отсюда,
+            # «Готово» вместо «Сохранить»: акцент, фон, режим и каталог
+            # пишутся сразу, а ставка, нормы, операторы и налог — отсюда,
             # с проверкой введённого.
             ft.Row([ft.ElevatedButton("Готово", on_click=self._save, width=300)],
                    alignment=ft.MainAxisAlignment.CENTER),
             ft.Container(height=90),
         ], spacing=14, scroll=ft.ScrollMode.AUTO, expand=True)
+
+    # ---------- режим смены ----------
+    def _build_mode(self):
+        th = self.th
+        self.mode_cells = []
+        cells = []
+        for mode in (MODE_NIGHT, MODE_DAY):
+            cell = ft.Container(
+                expand=1, height=48, border_radius=10,
+                alignment=ft.Alignment.CENTER,
+                content=ft.Column([
+                    ft.Text(MODE_TITLES[mode], size=12,
+                            text_align=ft.TextAlign.CENTER),
+                    ft.Text(MODE_SUBTITLES[mode], size=9,
+                            text_align=ft.TextAlign.CENTER),
+                ], spacing=0, tight=True,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                on_click=lambda e, m=mode: self._select_mode(m),
+            )
+            self.mode_cells.append((cell, mode))
+            cells.append(cell)
+
+        self.mode_row = ft.Container(
+            bgcolor=th.color("field_bg"), border_radius=12, padding=3,
+            content=ft.Row(cells, spacing=3),
+        )
+        self.mode_hint = th.text("", role="faint", size=10)
+
+    def _select_mode(self, mode):
+        touch(self.ctx)
+        if mode_of(self.ctx.config) == mode:
+            return
+        haptics.select()
+        # Пишем сразу: данные разных режимов лежат раздельно, поэтому
+        # переключение ничего не теряет и не требует подтверждения.
+        db.save_config(shift_mode=mode)
+        self.ctx.config.update(db.get_config())
+        self._paint_mode()
+        self._sync_mode_labels()
+        # Календарь, аналитика и модалка пересобираются под новый режим.
+        self.ctx.rebuild_for_mode()
+        refresh_tree(self.mode_row, self.mode_hint, self.rate_field,
+                     self.rate_hint, self.norm_title, self.cycle_hint,
+                     self.control)
+
+    def _paint_mode(self):
+        th = self.th
+        current = mode_of(self.ctx.config)
+        for cell, mode in self.mode_cells:
+            active = mode == current
+            cell.bgcolor = th.accent() if active else "#00000000"
+            cell.content.controls[0].color = (th.on_accent() if active
+                                              else th.color("text"))
+            cell.content.controls[0].weight = (ft.FontWeight.BOLD if active
+                                               else None)
+            cell.content.controls[1].color = (th.on_accent() if active
+                                              else th.color("text_dim"))
+
+    def _sync_mode_labels(self):
+        """Подписи, зависящие от режима, обновляются на месте."""
+        mode = mode_of(self.ctx.config)
+        day = is_day_mode(self.ctx.config)
+
+        self.mode_hint.value = (
+            "Расчёты, график операторов и подписи подстроены под "
+            f"{'дневную' if day else 'ночную'} смену. Данные другого режима "
+            "сохраняются отдельно и не теряются.")
+        self.rate_field.label = ("Стоимость 1 часа, дневная смена (₽)" if day
+                                 else "Стоимость 1 часа, ночная смена (₽)")
+        self.rate_hint.value = ("Ставка своя для каждого режима — "
+                                "переключение её не затирает.")
+        self.norm_title.value = f"Нормы выработки {term(mode, 'per_shift')}, кг"
+        self.cycle_hint.value = (
+            "Цикл: день → ночь → отсыпной → выходной. Укажите дату, в которую "
+            "Оператор 1 выходил в НОЧЬ — дневная сетка сдвигается сама.")
 
     # ---------- налог ----------
     def _build_tax(self):
@@ -269,11 +355,12 @@ class SettingsView:
         self.ctx.theme.refresh_background()
         self._paint_theme_selection()
         self._paint_tax()
+        self._paint_mode()
         self._refresh_products()
         self.simple_bg_switch.active_color = self.th.accent()
         self.haptics_switch.active_color = self.th.accent()
         refresh_tree(self.accent_row, self.bg_column, self.tax_row,
-                     self.products_list, self.control)
+                     self.mode_row, self.products_list, self.control)
 
     def _paint_theme_selection(self):
         th = self.th
@@ -309,13 +396,15 @@ class SettingsView:
         """Подтверждение удаления показывается прямо в строке: диалог
         заставлял страницу настроек прыгать наверх."""
         th = self.th
+        mode = mode_of(self.ctx.config)
+        short = term(mode, "shifts_short")
         controls = []
         for name in db.get_products():
             label = ft.Text(name, size=12, color=th.color("text"), expand=True)
 
             if self.pending_delete == name:
                 used = db.product_usage_count(name)
-                caption = "Удалить?" if not used else f"Удалить? (в {used} ноч.)"
+                caption = "Удалить?" if not used else f"Удалить? (в {used} {short})"
                 controls.append(ft.Row([
                     ft.Text(caption, size=11, color="#fbbf24", expand=True),
                     ft.TextButton("Да", on_click=lambda e, n=name: self._delete_product(n),
@@ -436,11 +525,14 @@ class SettingsView:
     # ==========================================
     # ЗАГРУЗКА / СОХРАНЕНИЕ
     # ==========================================
+    def _rate_key(self):
+        return "day_hour_rate" if is_day_mode(self.ctx.config) else "hour_rate"
+
     def load(self):
         config = db.get_config()
         self.ctx.config.update(config)
 
-        self.rate_field.value = str(config["hour_rate"])
+        self.rate_field.value = str(config[self._rate_key()])
         self.cycle_field.value = config["cycle_start"]
         self.norm1_field.value = format_weight(config["norm_shop1"]).replace(" ", "")
         self.norm2_field.value = format_weight(config["norm_shop2"]).replace(" ", "")
@@ -450,6 +542,8 @@ class SettingsView:
 
         self.tax_value = config["tax_rate"]
         self._paint_tax()
+        self._paint_mode()
+        self._sync_mode_labels()
         self._paint_theme_selection()
         self.simple_bg_switch.value = bool(config["simple_bg"])
         self.haptics_switch.value = bool(config.get("haptics", 1))
@@ -461,8 +555,8 @@ class SettingsView:
         self.new_product_input.error_text = None
         self.pending_delete = None
         self._refresh_products()
-        self.data_hint.value = ("CSV открывается в Excel, PDF — готовый табель "
-                                "за текущий месяц. Бэкап — полная копия базы.")
+        self.data_hint.value = ("CSV содержит обе смены. PDF — табель за "
+                                "текущий месяц и режим. Бэкап — копия базы.")
 
     # ---------- валидация на лету ----------
     def _read_number(self, field, minimum=0.0):
@@ -501,8 +595,7 @@ class SettingsView:
     def _persist(self, rate, norm1, norm2):
         names = [(field.value or "").strip() or f"Оператор {i + 1}"
                  for i, field in enumerate(self.op_fields)]
-        db.save_config(
-            hour_rate=rate,
+        values = dict(
             theme=self.ctx.config.get("theme") or DEFAULT_ACCENT,
             bg_theme=self.ctx.config.get("bg_theme") or DEFAULT_BG_THEME,
             op1=names[0], op2=names[1], op3=names[2], op4=names[3],
@@ -511,7 +604,11 @@ class SettingsView:
             simple_bg=1 if self.simple_bg_switch.value else 0,
             haptics=1 if self.haptics_switch.value else 0,
             norm_shop1=norm1, norm_shop2=norm2,
+            shift_mode=mode_of(self.ctx.config),
         )
+        # Ставка пишется в ключ своего режима — вторая остаётся нетронутой.
+        values[self._rate_key()] = rate
+        db.save_config(**values)
         self.ctx.config.update(db.get_config())
 
     def _save(self, e=None):
@@ -547,7 +644,7 @@ class SettingsView:
         """«Назад» и смена PIN тоже сохраняют; некорректные поля остаются прежними."""
         config = self.ctx.config
         self._persist(
-            self._read_number(self.rate_field) or config["hour_rate"],
+            self._read_number(self.rate_field) or config[self._rate_key()],
             self._read_number(self.norm1_field) or config["norm_shop1"],
             self._read_number(self.norm2_field) or config["norm_shop2"],
         )
