@@ -5,31 +5,24 @@ from constants import (DEFAULT_ACCENT, DEFAULT_BG_THEME, THEME_ACCENTS,
 
 TRANSPARENT = "#00000000"
 
-# Роль -> ключ палитры. "accent" обрабатывается отдельно.
 TEXT_ROLES = {
     "normal": "text",
     "dim": "text_dim",
     "faint": "text_faint",
 }
 
-# Радиальный градиент круглой кнопки: прозрачный в центре, светлеющий к краю.
 GLASS_KEY_COLORS = ["#0fffffff", "#14ffffff", "#3dffffff"]
 GLASS_KEY_STOPS = [0.0, 0.68, 1.0]
 
 # Верхний блик карточки в режиме скорости — заменяет backdrop-blur.
 GLOSS_STOPS = [0.0, 0.5]
 
-# Имя свойства иконки различается между сборками Flet — ищем реальное.
 ICON_ATTRS = ("icon", "name", "value")
 
 
 def safe_update(control):
-    """
-    Точечное обновление вместо page.update(): контрол может быть ещё не
-    добавлен на страницу, и тогда update() бросает исключение.
-    Живёт здесь, а не в views/common, чтобы Theme мог им пользоваться
-    без обратного импорта (граф импортов остаётся линейным).
-    """
+    """Точечное обновление: контрол может быть ещё не добавлен на страницу.
+    Живёт здесь, чтобы Theme мог им пользоваться без обратного импорта."""
     try:
         control.update()
     except Exception:
@@ -37,17 +30,13 @@ def safe_update(control):
 
 
 def sync_value(e):
-    """Flet не всегда пишет ввод в .value до потери фокуса — синхронизируем вручную.
-    Здесь сознательно нет page.update(): раньше он дёргался на каждый символ."""
+    """Flet не всегда пишет ввод в .value до потери фокуса."""
     e.control.value = e.data
 
 
 def set_icon(control, icon_value):
-    """
-    Меняет символ у ft.Icon. Прямое присваивание .name в Flet 0.86 создаёт
-    новый атрибут вместо смены иконки — отсюда были стрелки, всегда
-    смотрящие вверх. Ищем то свойство, которое у контрола реально есть.
-    """
+    """Прямое присваивание .name в Flet 0.86 создаёт новый атрибут вместо
+    смены иконки — ищем то свойство, которое у контрола реально есть."""
     for attr in ICON_ATTRS:
         if hasattr(control, attr):
             setattr(control, attr, icon_value)
@@ -55,9 +44,35 @@ def set_icon(control, icon_value):
     return False
 
 
+def release_focus(page, *controls):
+    """
+    Снимает фокус с полей ввода и убирает клавиатуру. Метода «закрыть
+    клавиатуру» во Flet нет, поэтому используем приём с read_only:
+    переключение отпускает фокус во Flutter.
+    """
+    for control in controls:
+        if control is None:
+            continue
+        blur = getattr(control, "blur_focus", None) or getattr(control, "unfocus", None)
+        if callable(blur):
+            try:
+                blur()
+                continue
+            except Exception:
+                pass
+        if hasattr(control, "read_only"):
+            try:
+                was = control.read_only
+                control.read_only = True
+                safe_update(control)
+                control.read_only = was
+                safe_update(control)
+            except Exception:
+                pass
+
+
 class Theme:
-    """Единая точка правды по цветам. Держит ссылки на созданные контролы,
-    чтобы смена палитры применялась мгновенно и без перестройки дерева."""
+    """Единая точка правды по цветам."""
 
     def __init__(self, config):
         self.config = config
@@ -68,17 +83,36 @@ class Theme:
         self._icons = []
         self._dividers = []
         self._glass_keys = []
-        # Подпись палитры: пока она не менялась, полная перекраска не нужна.
         self._signature = None
+        # Временные контролы (модалки) не регистрируются: раньше каждое
+        # открытие дня добавляло ~25 ссылок навсегда, списки росли, и
+        # перекраска темы перебирала свалку мёртвых контролов.
+        self._tracking = True
+
+    # ==========================================
+    # РЕЖИМ ВРЕМЕННЫХ КОНТРОЛОВ
+    # ==========================================
+    def begin_temp(self):
+        self._tracking = False
+
+    def end_temp(self):
+        self._tracking = True
+
+    def _track(self, store, item):
+        if self._tracking:
+            store.append(item)
 
     # ==========================================
     # ЦВЕТА
     # ==========================================
     def accent(self):
-        return THEME_ACCENTS.get(self.config.get("theme"), THEME_ACCENTS[DEFAULT_ACCENT])
+        value = self.config.get("theme")
+        # Цвет из палитры хранится как HEX прямо в конфиге.
+        if isinstance(value, str) and value.startswith("#"):
+            return value
+        return THEME_ACCENTS.get(value, THEME_ACCENTS[DEFAULT_ACCENT])
 
     def accent_a(self, alpha_hex):
-        """Акцент с прозрачностью: accent_a('40') -> '#40c9a6ff'."""
         return f"#{alpha_hex}{self.accent().lstrip('#')}"
 
     def palette(self):
@@ -96,7 +130,6 @@ class Theme:
         return bool(self.config.get("simple_bg"))
 
     def on_accent(self):
-        """Цвет текста поверх акцентной заливки: на светлом акценте — тёмный."""
         return "#101014"
 
     def _role_color(self, role):
@@ -116,32 +149,31 @@ class Theme:
     def text(self, value="", role="normal", **kwargs):
         control = ft.Text(value, **kwargs)
         control.color = self._role_color(role)
-        self._texts.append((control, role))
+        self._track(self._texts, (control, role))
         return control
 
     def field(self, **kwargs):
         kwargs.setdefault("on_change", sync_value)
         control = ft.TextField(**kwargs)
         self._paint_field(control)
-        self._fields.append(control)
+        self._track(self._fields, control)
         return control
 
     def icon(self, icon_value, role="normal", **kwargs):
-        """Иконка, перекрашиваемая вместе с темой."""
         control = ft.Icon(icon_value, **kwargs)
         control.color = self._role_color(role)
-        self._icons.append((control, role))
+        self._track(self._icons, (control, role))
         return control
 
     def icon_button(self, icon, role="normal", **kwargs):
         control = ft.IconButton(icon, **kwargs)
         control.icon_color = self._role_color(role)
-        self._icons.append((control, role))
+        self._track(self._icons, (control, role))
         return control
 
     def divider(self):
         control = ft.Divider(color=self.color("glass_border"), height=9)
-        self._dividers.append(control)
+        self._track(self._dividers, control)
         return control
 
     def _paint_field(self, control):
@@ -152,7 +184,6 @@ class Theme:
 
     @staticmethod
     def _paint_icon(control, color):
-        """У IconButton цвет в icon_color, у Icon — в color."""
         if hasattr(control, "icon_color"):
             control.icon_color = color
         else:
@@ -163,11 +194,10 @@ class Theme:
     # ==========================================
     def glass_key(self, content, on_press=None, size=68, animate=True):
         """
-        Круглая кнопка «жидкого стекла»: радиальный градиент, светлеющий к краю.
-        Blur снят намеренно и в обоих режимах: под клавишами лежит гладкий
-        градиент, размывать там нечего, а 14 BackdropFilter на экране PIN
-        роняли частоту кадров. ink=False по той же причине — материаловский
-        ripple перерисовывал клавишу все 300 мс своей анимации.
+        Blur снят намеренно в обоих режимах: под клавишами лежит гладкий
+        градиент, размывать нечего, а 14 BackdropFilter на экране PIN
+        роняли частоту кадров. ink=False — ripple перерисовывал клавишу
+        все 300 мс своей анимации.
         """
         key = ft.Container(
             width=size, height=size, border_radius=size // 2,
@@ -177,14 +207,12 @@ class Theme:
         )
         if animate:
             key.animate_scale = ft.Animation(90, ft.AnimationCurve.EASE_OUT)
-        self._glass_keys.append(key)
+        self._track(self._glass_keys, key)
         self._paint_glass_key(key)
 
         if on_press is None:
             return key
 
-        # Нажатие вешаем на GestureDetector ради «сжатия» кнопки; если в этой
-        # сборке Flet нет tap_down/tap_up — откатываемся на обычный on_click.
         detector = ft.GestureDetector(content=key)
         has_down = self._bind(detector, lambda e, k=key: self.squeeze(k, True),
                               "on_tap_down")
@@ -221,21 +249,32 @@ class Theme:
     # ==========================================
     # СТЕКЛО (карточки)
     # ==========================================
-    def card(self, content, blur=False, **extra):
-        """blur=True оставляем только для шапки и навигации: их всего две,
-        и в режиме «Максимум» это по карману даже слабому GPU."""
+    @staticmethod
+    def _stretch_row():
+        """
+        Невидимая распорка. Column с tight=True получает ширину по самому
+        широкому потомку, поэтому карточки с коротким содержимым выходили
+        уже остальных. Растянутый Row внутри заставляет колонку занять
+        всю доступную ширину.
+        """
+        return ft.Row([ft.Container(height=0, expand=True)], spacing=0,
+                      height=0)
+
+    def card(self, content, blur=False, stretch=True, **extra):
+        """blur=True — только для шапки и навигации."""
+        if stretch and isinstance(content, ft.Column):
+            content.controls.insert(0, self._stretch_row())
+
         params = dict(content=content, border_radius=18, padding=16)
         params.update(extra)
         card = ft.Container(**params)
-        self._cards.append((card, blur))
+        self._track(self._cards, (card, blur))
         self._paint_card(card, blur)
         return card
 
     def _gloss_gradient(self):
-        """
-        Верхний блик — замена блюра в режиме скорости. Градиент в Flutter
-        перекрывает bgcolor, поэтому цвет стекла включён нижним стопом.
-        """
+        """Верхний блик — замена блюра в режиме скорости. Градиент
+        перекрывает bgcolor, поэтому цвет стекла идёт нижним стопом."""
         top = "#33ffffff" if self.is_dark() else "#e6ffffff"
         return ft.LinearGradient(
             begin=ft.Alignment.TOP_CENTER, end=ft.Alignment.BOTTOM_CENTER,
@@ -256,27 +295,40 @@ class Theme:
     # ПОЛОСА ПРОКРУТКИ
     # ==========================================
     def _scrollbar_theme(self):
-        """Тонкая полупрозрачная полоса вместо толстой системной.
-        Набор полей ScrollbarTheme отличается между сборками — пробуем
-        от полного к минимальному."""
+        """
+        Тонкая полупрозрачная полоса, видимая только во время прокрутки.
+        Набор полей ScrollbarTheme отличается между сборками, поэтому
+        добавляем свойства по одному и оставляем те, что приняты.
+        """
         cls = getattr(ft, "ScrollbarTheme", None)
         if cls is None:
             return None
-        variants = (
-            dict(thickness=4, interactive=False, thumb_visibility=True,
-                 track_visibility=False, radius=2,
-                 thumb_color=self.color("text_faint")),
-            dict(thickness=4, interactive=False,
-                 thumb_color=self.color("text_faint")),
-            dict(thickness=4, thumb_color=self.color("text_faint")),
-            dict(thickness=4),
+
+        candidates = (
+            ("thickness", 4),
+            ("thumb_visibility", False),   # видна только при прокрутке
+            ("track_visibility", False),
+            ("interactive", False),
+            ("radius", 2),
+            ("thumb_color", self.color("text_faint")),
+            ("main_axis_margin", 6),
+            ("cross_axis_margin", 2),
         )
-        for kwargs in variants:
+        accepted = {}
+        for name, value in candidates:
+            trial = dict(accepted)
+            trial[name] = value
             try:
-                return cls(**kwargs)
+                cls(**trial)
+                accepted = trial
             except Exception:
                 continue
-        return None
+        if not accepted:
+            return None
+        try:
+            return cls(**accepted)
+        except Exception:
+            return None
 
     def _make_page_theme(self):
         seed = self.accent()
@@ -292,7 +344,6 @@ class Theme:
     # ФОН
     # ==========================================
     def background(self):
-        """Один фон на всё приложение, кладётся в самый низ корневого Stack."""
         pal = self.palette()
         base = ft.Container(
             expand=True,
@@ -315,22 +366,19 @@ class Theme:
         colors = self._sphere_colors()
         for sphere, color in zip(spheres, colors):
             if self.simple_bg():
-                # режим скорости: сфер нет вообще, только градиент
                 sphere.gradient = None
                 sphere.bgcolor = TRANSPARENT
                 sphere.visible = False
                 continue
             sphere.visible = True
             sphere.bgcolor = None
-            # радиальный градиент с прозрачным краем даёт тот же мягкий ореол,
-            # что и Blur, но стоит на порядок дешевле при отрисовке
             sphere.gradient = ft.RadialGradient(
                 colors=[color, TRANSPARENT], stops=[0.0, 1.0]
             )
 
     def refresh_background(self):
-        """Фон лежит в корневом Stack вне экранов, поэтому обычное обновление
-        экрана его не задевает — отсюда был баг «фон меняется не сразу»."""
+        """Фон лежит в корневом Stack вне экранов, обычное обновление
+        экрана его не задевает."""
         for base, spheres in self._backgrounds:
             safe_update(base)
             for sphere in spheres:
@@ -340,13 +388,7 @@ class Theme:
     # ПРИМЕНЕНИЕ ТЕМЫ
     # ==========================================
     def apply(self, page):
-        """
-        Перекрашивает уже созданные контролы на месте.
-        Возвращает True, если палитра действительно изменилась — тогда
-        вызывающему нужен page.update() ради page.bgcolor и page.theme.
-        При простой навигации между экранами возвращает False, и полный
-        диф всего дерева не отправляется.
-        """
+        """Возвращает True, если палитра изменилась и нужен page.update()."""
         signature = (self.config.get("theme"), self.config.get("bg_theme"),
                      self.simple_bg())
         if signature == self._signature:
