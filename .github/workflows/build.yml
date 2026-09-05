@@ -5,6 +5,12 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+# Новый пуш гасит предыдущую сборку: при правке файлов по одному
+# промежуточные состояния репозитория собирать смысла нет.
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   # Flet 0.86 по умолчанию берёт CPython 3.14 — принудительно возвращаем 3.12
   SERIOUS_PYTHON_VERSION: '3.12'
