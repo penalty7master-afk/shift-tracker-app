@@ -3,11 +3,11 @@ from datetime import date, datetime
 
 import flet as ft
 
-from calculations import (format_hours, format_money, month_forecast,
-                          month_summary, get_operator_for_date, norm_for_shop,
+from calculations import (format_hours, format_money, get_operator_for_date,
+                          mode_of, month_forecast, month_summary, norm_for_shop,
                           op_names_from)
 from constants import (MONTH_NAMES, SHOP1, SHOP2, STATUS_COLORS, STATUS_WORK,
-                       WEEKDAY_SHORT)
+                       WEEKDAY_SHORT, term)
 from views.common import refresh_tree, safe_update, set_icon, touch
 from views.day_modal import show_day_modal
 
@@ -116,10 +116,9 @@ class CalendarView:
 
     def _build_legend(self):
         th = self.th
+        self.legend_text = th.text("", role="faint", size=10)
         rows = [
-            th.text("Значки в дне: первая стрелка — цех 1, вторая — цех 2. "
-                    "Вверх зелёная — норма выполнена, вниз красная — нет.",
-                    role="faint", size=10),
+            self.legend_text,
             ft.Row([
                 ft.Container(width=6, height=6, border_radius=3, bgcolor=DOT_NOTE),
                 th.text("заметка", role="faint", size=10),
@@ -187,6 +186,7 @@ class CalendarView:
         shifts_data = self.ctx.month_data
         production_data = self.ctx.production_data
         config = self.ctx.config
+        mode = mode_of(config)
         ops = op_names_from(config)
         cycle_start = config.get("cycle_start")
         timeline_dates = self.ctx.timeline_dates
@@ -195,6 +195,10 @@ class CalendarView:
         today = date.today()
 
         self.month_label.value = f"{MONTH_NAMES[month - 1]} {year}"
+        self.legend_text.value = (
+            f"Значки в дне: первая стрелка — цех 1, вторая — цех 2. "
+            f"Вверх зелёная — норма {term(mode, 'per_shift')} выполнена, "
+            f"вниз красная — нет.")
 
         weeks = calendar.Calendar(firstweekday=0).monthdayscalendar(year, month)
         for index, row in enumerate(self.week_rows):
@@ -206,16 +210,17 @@ class CalendarView:
                 self._paint_cell(self.cells[week_index][day_index],
                                  week[day_index], year, month, day_index,
                                  shifts_data, production_data, ops, cycle_start,
-                                 norms, timeline_dates, today)
+                                 mode, norms, timeline_dates, today)
 
         self._refresh_premium(shifts_data, config)
         self._refresh_forecast(year, month, shifts_data, config, today)
         # Раньше уходила вся колонка: сетка + неизменная легенда + обе
         # карточки, причём карточки повторно.
-        refresh_tree(self.month_label, self.grid)
+        refresh_tree(self.month_label, self.legend_text, self.grid)
 
     def _paint_cell(self, cell, day, year, month, weekday, shifts_data,
-                    production_data, ops, cycle_start, norms, timeline_dates, today):
+                    production_data, ops, cycle_start, mode, norms,
+                    timeline_dates, today):
         th = self.th
         day_text, op_text, marks_holder = cell.content.controls
         marks = marks_holder.content
@@ -236,8 +241,10 @@ class CalendarView:
         shift = shifts_data.get(date_str)
         record = production_data.get(date_str)
 
+        # Сетка операторов сдвигается вместе с режимом: кто работает днём
+        # сегодня, выходит в ночь завтра.
         operator = (record or {}).get("operator") or get_operator_for_date(
-            current, ops, cycle_start)
+            current, ops, cycle_start, mode)
 
         bg_color = th.color("weekend") if weekday >= 5 else TRANSPARENT
         border_color = th.color("cell_border")
@@ -279,6 +286,8 @@ class CalendarView:
                 continue
             arrow.visible = True
             above_norm = float(weight) >= norms[shop]
+            # set_icon вместо arrow.name: в Flet 0.86 присваивание .name
+            # молча создавало новый атрибут, и стрелка всегда смотрела вверх
             set_icon(arrow, ft.Icons.ARROW_UPWARD if above_norm
                      else ft.Icons.ARROW_DOWNWARD)
             arrow.color = ARROW_UP if above_norm else ARROW_DOWN
