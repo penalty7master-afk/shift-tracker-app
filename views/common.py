@@ -5,7 +5,8 @@ from theme import (release_focus, safe_update, set_icon,  # noqa: F401
 
 
 class AppContext:
-    """Общее состояние, которое экраны передают друг другу."""
+    """Общее состояние, которое экраны передают друг другу.
+    Колбэки заполняются в ui.py после сборки всех экранов."""
 
     def __init__(self, page, config, theme):
         self.page = page
@@ -13,10 +14,14 @@ class AppContext:
         self.theme = theme
 
         self.view = {"year": 0, "month": 0}
-        self.month_data = {}          # кэш смен месяца
+        self.month_data = {}          # кэш смен месяца: один запрос вместо трёх
         self.production_data = {}     # кэш производства месяца
         self.timeline_dates = set()   # дни месяца с хронологией
-        self.analytics_dirty = True
+        self.analytics_dirty = True   # аналитика пересчитывается при показе
+
+        self.compare_text = ""        # «+12 400 ₽ к августу» для карточки прогноза
+        self.on_unlock = None         # снимается автоблокировкой после ввода PIN
+        self.rebuild_for_mode = None  # пересборка после смены режима день/ночь
 
         # Текущий открытый диалог. Нужен блокировке по бездействию:
         # AlertDialog живёт в отдельном слое над деревом страницы, поэтому
@@ -84,7 +89,7 @@ def force_close_dialog(ctx):
 
 
 def bind_event(control, handler, *names):
-    """Имена событий отличаются между сборками Flet."""
+    """Имена событий отличаются между сборками Flet — привязываем безопасно."""
     for attr in names:
         if hasattr(control, attr):
             setattr(control, attr, handler)
@@ -93,8 +98,11 @@ def bind_event(control, handler, *names):
 
 
 def refresh_tree(*controls):
-    """Обновляет несколько контролов подряд вместо page.update():
-    полное обновление сбрасывает позицию прокрутки в начало."""
+    """
+    Обновляет несколько контролов подряд. Нужен там, где раньше стоял
+    page.update(): полное обновление страницы сбрасывает позицию прокрутки
+    в начало, и настройки прыгали наверх при выборе темы или удалении продукта.
+    """
     for control in controls:
         safe_update(control)
 
