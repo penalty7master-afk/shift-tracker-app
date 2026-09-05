@@ -4,8 +4,8 @@ import flet as ft
 
 import haptics
 from calculations import (format_hours, format_money, format_signed_money,
-                          month_summary, prev_month)
-from constants import MONTH_NAMES, STATUS_WORK
+                          mode_of, month_summary, prev_month)
+from constants import ARRIVAL_ON_TIME, FULL_SHIFT_HOURS, MONTH_NAMES, STATUS_WORK
 from database import db
 from lock import IdleLock
 from theme import Theme
@@ -13,11 +13,12 @@ from views.analytics_view import AnalyticsView
 from views.calendar_view import CalendarView
 from views.common import AppContext, bind_event, force_close_dialog, refresh_tree
 from views.day_modal import drop_day_modal
+from views.mode_view import ModeView
 from views.pin_view import PinView
 from views.settings_view import SettingsView
 
-# Анимация смены экрана выключена намеренно. AnimatedSwitcher держит в дереве
-# сразу оба экрана и рисует их через слой прозрачности — отсюда была
+# Анимация смены экрана выключена намеренно: AnimatedSwitcher держит в
+# дереве оба экрана и рисует их через слой прозрачности — отсюда была
 # «заморозка» при входе в настройки. Поставь True, чтобы вернуть переход.
 USE_SCREEN_ANIMATION = False
 SWITCHER_MS = 140
@@ -96,6 +97,7 @@ def main(page: ft.Page):
     # ---------- экраны ----------
     calendar_view = CalendarView(ctx)
     pin_view = PinView(ctx, on_success=lambda: show_main())
+    mode_view = ModeView(ctx, on_done=lambda: show_pin())
     screens = {}
     spacers = []
 
@@ -271,9 +273,12 @@ def main(page: ft.Page):
     def reload_month():
         """Единственное чтение месяца из БД — им пользуются все экраны."""
         year, month = ctx.view["year"], ctx.view["month"]
+        mode = mode_of(config)
         ctx.month_data = db.get_month_shifts(year, month)
-        ctx.production_data = db.get_month_production(year, month)
-        ctx.timeline_dates = db.get_timeline_dates(year, month)
+        # Производство и трекер читаются только по текущему режиму:
+        # дневные и ночные записи лежат раздельно и не смешиваются.
+        ctx.production_data = db.get_month_production(year, month, mode)
+        ctx.timeline_dates = db.get_timeline_dates(year, month, mode)
         update_comparison(month_summary(ctx.month_data, config)["net"])
         update_header()
         calendar_view.refresh()
@@ -284,6 +289,18 @@ def main(page: ft.Page):
             ctx.analytics_dirty = False
 
     def refresh_after_change():
+        analytics = screens.get("analytics")
+        if analytics is not None:
+            analytics.invalidate_year()
+        reload_month()
+
+    def rebuild_for_mode():
+        """
+        Пересборка после смены режима. Модалка дня строится один раз, и
+        её подписи с сеткой прихода зашиты при сборке — поэтому кэш
+        сбрасывается, дерево соберётся заново с новыми надписями.
+        """
+        drop_day_modal()
         analytics = screens.get("analytics")
         if analytics is not None:
             analytics.invalidate_year()
@@ -300,9 +317,9 @@ def main(page: ft.Page):
             haptics.warn()
             return
 
-        from constants import ARRIVAL_OPTIONS, FULL_SHIFT_HOURS
         db.save_shift(date_str, FULL_SHIFT_HOURS, STATUS_WORK,
-                      ARRIVAL_OPTIONS[0], existing.get("note"), None)
+                      ARRIVAL_ON_TIME, existing.get("note"), None,
+                      mode_of(config))
         haptics.confirm()
 
         # Если открыт другой месяц — перебрасываем на текущий, иначе
@@ -322,8 +339,17 @@ def main(page: ft.Page):
     idle_lock.set_dirty_check(lambda: bool(ctx.dialog_dirty))
     ctx.touch = idle_lock.touch
     ctx.on_unlock = idle_lock.arm
+    ctx.rebuild_for_mode = rebuild_for_mode
 
     # ---------- переходы ----------
+    def show_mode_choice():
+        """Первый запуск: выбор режима до создания PIN-кода."""
+        idle_lock.disarm()
+        mode_view.show()
+        changed = theme.apply(page)
+        sync_switcher()
+        set_screen(mode_view.control, full=changed)
+
     def show_pin(force_setup=False):
         idle_lock.disarm()
         pin_view.show(force_setup=force_setup)
@@ -373,4 +399,8 @@ def main(page: ft.Page):
     # ---------- старт ----------
     drop_day_modal()
     page.add(ft.Stack(expand=True, controls=[theme.background(), screen_holder]))
-    show_pin()
+    # Режим спрашивается один раз за всю историю пользования.
+    if config.get("mode_chosen"):
+        show_pin()
+    else:
+        show_mode_choice()
