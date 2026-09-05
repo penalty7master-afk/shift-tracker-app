@@ -260,27 +260,33 @@ class Theme:
         return ft.Row([ft.Container(height=0, expand=True)], spacing=0,
                       height=0)
 
-    def card(self, content, blur=False, stretch=True, **extra):
-        """blur=True — только для шапки и навигации."""
+    def card(self, content, blur=False, stretch=True, blur_sigma=18, **extra):
+        """blur=True — только для шапки и навигации. blur_sigma позволяет
+        сделать панель прозрачнее: у маленькой таблетки навигации сильное
+        размытие выглядит матовым, а у широкой шапки — воздушным."""
         if stretch and isinstance(content, ft.Column):
             content.controls.insert(0, self._stretch_row())
 
         params = dict(content=content, border_radius=18, padding=16)
         params.update(extra)
         card = ft.Container(**params)
-        self._track(self._cards, (card, blur))
-        self._paint_card(card, blur)
+        self._track(self._cards, (card, blur, blur_sigma))
+        self._paint_card(card, blur, blur_sigma)
         return card
+
+    def dialog_bgcolor(self):
+        """Фон модального окна: тон темы вместо системного чёрного."""
+        return self.palette().get("dialog", self.color("page"))
 
     def _gloss_gradient(self):
         """Верхний блик — замена блюра в режиме скорости. Градиент
         перекрывает bgcolor, поэтому цвет стекла идёт нижним стопом."""
-        top = "#33ffffff" if self.is_dark() else "#e6ffffff"
+        top = "#33ffffff" if self.is_dark() else "#ccffffff"
         return ft.LinearGradient(
             begin=ft.Alignment.TOP_CENTER, end=ft.Alignment.BOTTOM_CENTER,
             colors=[top, self.color("glass")], stops=list(GLOSS_STOPS))
 
-    def _paint_card(self, card, blur):
+    def _paint_card(self, card, blur, blur_sigma=18):
         pal = self.palette()
         card.bgcolor = pal["glass"]
         card.border = ft.Border.all(1, pal["glass_border"])
@@ -289,7 +295,7 @@ class Theme:
             card.gradient = self._gloss_gradient()
         else:
             card.gradient = None
-            card.blur = ft.Blur(18, 18) if blur else None
+            card.blur = ft.Blur(blur_sigma, blur_sigma) if blur else None
 
     # ==========================================
     # ПОЛОСА ПРОКРУТКИ
@@ -407,8 +413,8 @@ class Theme:
             )
             self._paint_spheres(spheres)
 
-        for card, blur in self._cards:
-            self._paint_card(card, blur)
+        for card, blur, blur_sigma in self._cards:
+            self._paint_card(card, blur, blur_sigma)
 
         for key in self._glass_keys:
             self._paint_glass_key(key)
