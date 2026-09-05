@@ -2,14 +2,17 @@ import flet as ft
 import flet_charts as fch
 
 from calculations import (format_hours, format_money, format_weight,
-                          month_summary, operator_stats, production_summary,
-                          year_summaries)
-from constants import (MONTH_SHORT, SHOP_KEYS, SHOP_SHORT, SHOP_TITLES, tax_label)
+                          month_summary, my_shift_dates, operator_stats,
+                          production_summary, year_heatmap, year_summaries)
+from constants import (HEATMAP_COLORS, HEATMAP_EMPTY, MONTH_SHORT, SHOP_KEYS,
+                       SHOP_SHORT, SHOP_TITLES, STATUS_WORK, tax_label)
 from database import db
-from views.common import safe_update
+from views.common import bind_event, refresh_tree, safe_update, touch
 
 PIE_HEIGHT = 150
 BAR_HEIGHT = 90
+HEAT_CELL = 9
+HEAT_GAP = 2
 
 COLOR_OK = "#6ee7b7"
 COLOR_WARN = "#fbbf24"
@@ -18,12 +21,13 @@ COLOR_EMPTY = "#4dffffff"
 
 
 class AnalyticsView:
-    """Четыре раздела: моё за месяц, производство, операторы, год."""
+    """Пять разделов: моё за месяц, приход, производство, операторы, год."""
 
     def __init__(self, ctx):
         self.ctx = ctx
         self.th = ctx.theme
-        self.year_cache = {"year": None, "summaries": None}
+        self.year_cache = {"year": None, "summaries": None, "heatmap": None}
+        self.only_mine = False        # переключатель в блоке производства
         self._build()
 
     # ==========================================
@@ -38,13 +42,23 @@ class AnalyticsView:
         self.money_rows = ft.Column(spacing=6, tight=True)
         self.production_rows = ft.Column(spacing=10, tight=True)
         self.operator_rows = ft.Column(spacing=10, tight=True)
-        # Без tight: Row занимает всю ширину карточки, иначе карточка года
-        # сжималась по двенадцати столбикам и была уже остальных.
+
+        # Без tight: иначе карточка сжималась по ширине двенадцати столбиков
+        # и выглядела уже остальных.
         self.year_bars = ft.Row(spacing=4,
                                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                                 vertical_alignment=ft.CrossAxisAlignment.END)
         self.year_title = th.text("", size=12, weight=ft.FontWeight.BOLD)
         self.year_total = th.text("", role="dim", size=11)
+
+        self.mine_switch = ft.Switch(value=False, scale=0.8,
+                                     active_color=th.accent())
+        bind_event(self.mine_switch, self._on_mine_toggle,
+                   "on_change", "on_changed")
+        self.production_caption = th.text("", role="faint", size=10)
+
+        self.heatmap_column = ft.Column(spacing=HEAT_GAP, tight=True)
+        self.heatmap_legend = ft.Row(spacing=8, wrap=True)
 
         self.control = ft.Column([
             th.card(ft.Column([
@@ -60,8 +74,13 @@ class AnalyticsView:
             ], spacing=8, tight=True), padding=14),
 
             th.card(ft.Column([
-                th.text("ПРОИЗВОДСТВО ЗА МЕСЯЦ", size=12, weight=ft.FontWeight.BOLD),
-                th.text("По всем ночам, включая мои выходные.", role="faint", size=10),
+                ft.Row([
+                    th.text("ПРОИЗВОДСТВО ЗА МЕСЯЦ", size=12,
+                            weight=ft.FontWeight.BOLD, expand=True),
+                    th.text("только мои", role="faint", size=10),
+                    self.mine_switch,
+                ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                self.production_caption,
                 self.production_rows,
             ], spacing=10, tight=True), padding=14),
 
@@ -75,9 +94,16 @@ class AnalyticsView:
                 ft.Container(self.year_bars, height=BAR_HEIGHT + 26),
                 self.year_total,
             ], spacing=10, tight=True), padding=14),
-            # Запас снизу убран: теперь отступ под навигацией даёт распорка,
-            # которую ui.py вставляет в конец колонки. Два запаса подряд
-            # давали двойное пустое место.
+
+            th.card(ft.Column([
+                th.text("МОЙ ГОД", size=12, weight=ft.FontWeight.BOLD),
+                th.text("Каждый квадрат — день. Пустые не отмечены.",
+                        role="faint", size=10),
+                ft.Row([self.heatmap_column], scroll=ft.ScrollMode.HIDDEN),
+                self.heatmap_legend,
+            ], spacing=10, tight=True), padding=14),
+            # Запас снизу не нужен: отступ под навигацией даёт распорка,
+            # которую вставляет ui.py.
         ], spacing=10, scroll=ft.ScrollMode.AUTO, expand=True)
 
     # ==========================================
@@ -91,9 +117,10 @@ class AnalyticsView:
         summary = month_summary(shifts_data, config)
         self._refresh_money(summary)
         self._refresh_arrival(summary)
-        self._refresh_production(production_data, config)
+        self._refresh_production(production_data, shifts_data, config)
         self._refresh_operators(production_data, config)
         self._refresh_year(config)
+        self._refresh_heatmap()
         safe_update(self.control)
 
     # ---------- деньги ----------
@@ -155,11 +182,24 @@ class AnalyticsView:
             self.chart_arrival.sections = [self._section(1, COLOR_EMPTY, "Нет данных")]
 
     # ---------- производство ----------
-    def _refresh_production(self, production_data, config):
-        th = self.th
-        stats = production_summary(production_data, config)
-        controls = []
+    def _on_mine_toggle(self, e=None):
+        touch(self.ctx)
+        self.only_mine = bool(self.mine_switch.value)
+        self._refresh_production(self.ctx.production_data, self.ctx.month_data,
+                                 self.ctx.config)
+        refresh_tree(self.production_rows, self.production_caption)
 
+    def _refresh_production(self, production_data, shifts_data, config):
+        th = self.th
+        only = my_shift_dates(shifts_data) if self.only_mine else None
+        stats = production_summary(production_data, config, only_dates=only)
+
+        self.production_caption.value = (
+            "Только ночи, в которые я был на смене."
+            if self.only_mine
+            else "По всем ночам, включая мои выходные.")
+
+        controls = []
         for shop in SHOP_KEYS:
             row = stats[shop]
             controls.append(ft.Row([
@@ -234,15 +274,19 @@ class AnalyticsView:
         self.operator_rows.controls = controls
 
     # ---------- год ----------
+    def _year_data(self, config):
+        year = self.ctx.view["year"]
+        # Год перечитывается только при смене года, а не при каждом показе.
+        if self.year_cache["year"] != year:
+            shifts = db.get_year_shifts(year)
+            self.year_cache["year"] = year
+            self.year_cache["summaries"] = year_summaries(shifts, config)
+            self.year_cache["heatmap"] = year_heatmap(year, shifts)
+        return year
+
     def _refresh_year(self, config):
         th = self.th
-        year = self.ctx.view["year"]
-
-        # год перечитывается только при смене года, а не при каждом показе вкладки
-        if self.year_cache["year"] != year:
-            self.year_cache["year"] = year
-            self.year_cache["summaries"] = year_summaries(db.get_year_shifts(year),
-                                                          config)
+        year = self._year_data(config)
         summaries = self.year_cache["summaries"]
 
         values = [item["net"] for item in summaries]
@@ -267,6 +311,41 @@ class AnalyticsView:
 
         self.year_title.value = f"ГОД {year} — на руки по месяцам"
         self.year_total.value = f"Итого за год: {format_money(total)}"
+
+    # ---------- тепловая карта ----------
+    def _heat_color(self, status):
+        if status is None:
+            return HEATMAP_EMPTY
+        color = HEATMAP_COLORS.get(status, HEATMAP_EMPTY)
+        return self.th.accent() if color is None else color
+
+    def _refresh_heatmap(self):
+        th = self.th
+        months = self.year_cache["heatmap"] or []
+
+        rows = []
+        for index, days in enumerate(months):
+            cells = [ft.Container(
+                width=26, content=ft.Text(MONTH_SHORT[index], size=8,
+                                          color=th.color("text_faint")))]
+            for _day, status in days:
+                cells.append(ft.Container(
+                    width=HEAT_CELL, height=HEAT_CELL, border_radius=2,
+                    bgcolor=self._heat_color(status)))
+            rows.append(ft.Row(cells, spacing=HEAT_GAP, tight=True))
+        self.heatmap_column.controls = rows
+
+        legend = []
+        for label, status in (("смена", STATUS_WORK),
+                              ("вых. для премии", "Выходной для премии"),
+                              ("выходной", "Обычный выходной"),
+                              ("проспал", "Проспал")):
+            legend.append(ft.Row([
+                ft.Container(width=8, height=8, border_radius=2,
+                             bgcolor=self._heat_color(status)),
+                ft.Text(label, size=9, color=th.color("text_faint")),
+            ], spacing=4, tight=True))
+        self.heatmap_legend.controls = legend
 
     def invalidate_year(self):
         self.year_cache["year"] = None
