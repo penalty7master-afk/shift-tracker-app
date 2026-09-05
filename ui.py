@@ -9,7 +9,7 @@ from database import db
 from theme import Theme
 from views.analytics_view import AnalyticsView
 from views.calendar_view import CalendarView
-from views.common import AppContext, refresh_tree
+from views.common import AppContext, bind_event, refresh_tree
 from views.pin_view import PinView
 from views.settings_view import SettingsView
 
@@ -20,11 +20,20 @@ from views.settings_view import SettingsView
 USE_SCREEN_ANIMATION = False
 SWITCHER_MS = 140
 
-# Высота слоёв, лежащих поверх контента. Ровно на столько же отступают
-# распорки внутри прокрутки, иначе первая карточка окажется под шапкой.
-# Значения подобраны под экран 720p; правь здесь, если не сойдётся.
-HEADER_SPACE = 152
-NAV_SPACE = 96
+# Высоты плавающих панелей заданы явно: от них считаются распорки внутри
+# прокрутки, а вычисленная высота зависела бы от того, как лягут шрифты.
+HEADER_CARD_HEIGHT = 104
+NAV_CARD_HEIGHT = 52
+
+# Жёсткий зазор между панелью и ближайшей карточкой. Именно эта величина
+# остаётся одинаковой на любом устройстве.
+GAP_TOP = 10
+GAP_BOTTOM = 10
+
+# Запасные значения системных отступов, пока page.media ещё не заполнена
+# (до первой отрисовки) или если платформа их не сообщает.
+FALLBACK_INSET_TOP = 28
+FALLBACK_INSET_BOTTOM = 24
 
 SIDE_PADDING = 10
 
@@ -62,8 +71,28 @@ def main(page: ft.Page):
             settings_button,
         ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.START),
-        blur=True,
+        blur=True, height=HEADER_CARD_HEIGHT,
     )
+
+    # ==========================================
+    # СИСТЕМНЫЕ ОТСТУПЫ
+    # ==========================================
+    def system_inset(side):
+        """
+        Высота статус-бара / навигационной полосы в dp. Flet отдаёт их
+        в page.media и обновляет при повороте экрана, поэтому подбирать
+        числа под конкретный телефон не нужно.
+        """
+        fallback = FALLBACK_INSET_TOP if side == "top" else FALLBACK_INSET_BOTTOM
+        media = getattr(page, "media", None)
+        padding = getattr(media, "padding", None) if media else None
+        value = getattr(padding, side, None) if padding else None
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return fallback
+        # Ноль приходит до первой отрисовки — тогда честнее взять запасное.
+        return value if value > 0 else fallback
 
     # ---------- экраны ----------
     # Аналитика и настройки строятся при первом показе: раньше все четыре
@@ -71,6 +100,7 @@ def main(page: ft.Page):
     calendar_view = CalendarView(ctx)
     pin_view = PinView(ctx, on_success=lambda: show_main())
     screens = {}
+    spacers = []
 
     def add_edge_spacers(control):
         """
@@ -80,8 +110,20 @@ def main(page: ft.Page):
         """
         if not hasattr(control, "controls"):
             return
-        control.controls.insert(0, ft.Container(height=HEADER_SPACE))
-        control.controls.append(ft.Container(height=NAV_SPACE))
+        top = ft.Container(height=1)
+        bottom = ft.Container(height=1)
+        control.controls.insert(0, top)
+        control.controls.append(bottom)
+        spacers.append((top, bottom))
+
+    def sync_spacers():
+        """Пересчитывает распорки под текущие системные отступы."""
+        top_height = system_inset("top") + HEADER_CARD_HEIGHT + GAP_TOP
+        bottom_height = system_inset("bottom") + NAV_CARD_HEIGHT + GAP_BOTTOM
+        for top, bottom in spacers:
+            top.height = top_height
+            bottom.height = bottom_height
+            refresh_tree(top, bottom)
 
     add_edge_spacers(calendar_view.control)
 
@@ -91,6 +133,7 @@ def main(page: ft.Page):
             view = AnalyticsView(ctx)
             add_edge_spacers(view.control)
             screens["analytics"] = view
+            sync_spacers()
         return view
 
     def get_settings():
@@ -149,14 +192,13 @@ def main(page: ft.Page):
             make_nav_item(0, ft.Icons.CALENDAR_MONTH, "Календарь"),
             make_nav_item(1, ft.Icons.BAR_CHART, "Аналитика"),
         ], alignment=ft.MainAxisAlignment.CENTER, spacing=10),
-        blur=True, padding=6, border_radius=26,
+        blur=True, padding=6, border_radius=26, height=NAV_CARD_HEIGHT,
     )
     paint_nav(0)
 
     # Stack вместо Column: контент лежит на всю высоту экрана, шапка и
     # навигация — поверх него. Только так карточки проезжают под стеклом,
-    # и backdrop-blur получает что размывать. В Column слои не пересекались,
-    # и блюр размывал ровный градиент, то есть не давал ничего.
+    # и backdrop-blur получает что размывать.
     main_layout = ft.Stack([
         ft.Container(
             expand=True,
@@ -254,6 +296,9 @@ def main(page: ft.Page):
         changed = theme.apply(page)
         paint_nav(nav_state["index"])
         sync_switcher()
+        # Считаем отступы здесь: к моменту показа главного экрана страница
+        # уже отрисована и page.media заполнена реальными значениями.
+        sync_spacers()
         analytics = screens.get("analytics")
         if analytics is not None:
             analytics.invalidate_year()
@@ -266,6 +311,14 @@ def main(page: ft.Page):
         changed = theme.apply(page)
         sync_switcher()
         set_screen(view.control, full=changed)
+
+    def on_layout_change(e=None):
+        """Поворот экрана или смена системных панелей — пересчитываем."""
+        sync_spacers()
+
+    # Имя события отличается между сборками Flet — привязываем безопасно.
+    bind_event(page, on_layout_change,
+               "on_media_change", "on_media_changed", "on_resized", "on_resize")
 
     ctx.show_pin = show_pin
     ctx.show_main = show_main
