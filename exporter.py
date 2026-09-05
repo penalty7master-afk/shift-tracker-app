@@ -2,9 +2,10 @@ import csv
 import os
 from datetime import datetime
 
-from calculations import (format_hours, format_money, format_weight,
-                          month_summary, op_names_from)
-from constants import MONTH_NAMES, tax_label
+from calculations import (format_hours, format_money, format_weight, mode_of,
+                          month_summary, normalize_arrival, op_names_from)
+from constants import (MODE_DAY, MODE_NIGHT, MODE_TITLES, MONTH_NAMES,
+                       arrival_full, tax_label, term)
 from database import db
 
 # Порядок важен: сначала видимые пользователю папки, в конце — приватное
@@ -15,9 +16,11 @@ CANDIDATE_DIRS = [
     "/sdcard/Download",
 ]
 
-CSV_HEADER = ["Дата", "Статус", "Часы", "Время прибытия", "Премия выплачена",
-              "Заметка", "Оператор", "Цех 1 продукт", "Цех 1 кг",
-              "Цех 2 продукт", "Цех 2 кг"]
+CSV_HEADER = ["Дата", "Режим", "Статус", "Часы", "Время прибытия",
+              "Премия выплачена", "Заметка", "Оператор",
+              "Цех 1 продукт", "Цех 1 кг", "Цех 2 продукт", "Цех 2 кг"]
+
+MODE_CSV = {MODE_NIGHT: "Ночь", MODE_DAY: "День"}
 
 # Системные шрифты с кириллицей. Первый найденный уходит в PDF.
 FONT_CANDIDATES = [
@@ -74,7 +77,10 @@ def _number(value):
 # CSV
 # ==========================================
 def export_csv():
-    """Одна строка на дату: моя смена и производство рядом."""
+    """
+    Одна строка на смену. За дату может быть две строки — дневная и
+    ночная выработка хранятся отдельными записями.
+    """
     target = os.path.join(export_dir(), f"shifts_pro_{_stamp()}.csv")
     dates = db.get_all_dates()
 
@@ -84,20 +90,29 @@ def export_csv():
         writer.writerow(CSV_HEADER)
         for date_str in dates:
             shift = db.get_shift(date_str) or {}
-            record = db.get_production(date_str) or {}
-            writer.writerow([
-                date_str,
-                shift.get("status") or "",
-                format_hours(shift.get("hours")) if shift.get("hours") else "",
-                shift.get("arrival_status") or "",
-                _number(shift.get("premium_pay")),
-                (shift.get("note") or "").replace("\n", " "),
-                record.get("operator") or "",
-                record.get("product1") or "",
-                _number(record.get("weight1")),
-                record.get("product2") or "",
-                _number(record.get("weight2")),
-            ])
+            shift_mode = shift.get("shift_mode") or MODE_NIGHT
+            rows = db.production_rows_for_export(date_str)
+            if not rows:
+                rows = [(shift_mode, {})]
+
+            for mode, record in rows:
+                own = (mode == shift_mode)
+                writer.writerow([
+                    date_str,
+                    MODE_CSV.get(mode, mode),
+                    (shift.get("status") or "") if own else "",
+                    (format_hours(shift.get("hours"))
+                     if own and shift.get("hours") else ""),
+                    (arrival_full(mode, normalize_arrival(shift.get("arrival_status")))
+                     if own and shift.get("arrival_status") else ""),
+                    _number(shift.get("premium_pay")) if own else "",
+                    (shift.get("note") or "").replace("\n", " ") if own else "",
+                    record.get("operator") or "",
+                    record.get("product1") or "",
+                    _number(record.get("weight1")),
+                    record.get("product2") or "",
+                    _number(record.get("weight2")),
+                ])
     return target
 
 
@@ -128,11 +143,13 @@ def _translit(text):
 
 
 def export_pdf(year, month, config):
-    """Табель за месяц: сводка сверху, построчная таблица снизу."""
+    """Табель за месяц по текущему режиму: сводка сверху, таблица снизу."""
     try:
         from fpdf import FPDF
     except ImportError:
         raise OSError("Модуль fpdf2 не установлен в сборке")
+
+    mode = mode_of(config)
 
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=14)
@@ -148,7 +165,7 @@ def export_pdf(year, month, config):
         text = _translit
 
     shifts_data = db.get_month_shifts(year, month)
-    production_data = db.get_month_production(year, month)
+    production_data = db.get_month_production(year, month, mode)
     summary = month_summary(shifts_data, config)
 
     # ---- шапка ----
@@ -156,7 +173,8 @@ def export_pdf(year, month, config):
     pdf.cell(0, 9, text(f"Табель — {MONTH_NAMES[month - 1]} {year}"),
              new_x="LMARGIN", new_y="NEXT")
     pdf.set_font_size(9)
-    pdf.cell(0, 5, text(f"Сформировано {datetime.now().strftime('%d.%m.%Y %H:%M')}"),
+    pdf.cell(0, 5, text(f"{MODE_TITLES[mode]} · сформировано "
+                        f"{datetime.now().strftime('%d.%m.%Y %H:%M')}"),
              new_x="LMARGIN", new_y="NEXT")
     pdf.ln(3)
 
@@ -198,15 +216,17 @@ def export_pdf(year, month, config):
         pdf.cell(width, 7, text(title), border=1, align="C", fill=True)
     pdf.ln()
 
-    for date_str in db.get_month_dates(year, month):
+    for date_str in db.get_month_dates(year, month, mode):
         shift = shifts_data.get(date_str) or {}
         record = production_data.get(date_str) or {}
         hours = shift.get("hours")
+        arrival = shift.get("arrival_status")
         cells = [
             date_str[8:10] + "." + date_str[5:7],
             (shift.get("status") or "")[:18],
             format_hours(hours) if hours else "",
-            (shift.get("arrival_status") or "")[:14],
+            (arrival_full(mode, normalize_arrival(arrival))[:16]
+             if arrival else ""),
             (record.get("operator") or "")[:14],
             format_weight(record["weight1"]) if record.get("weight1") is not None else "",
             format_weight(record["weight2"]) if record.get("weight2") is not None else "",
@@ -219,10 +239,10 @@ def export_pdf(year, month, config):
     pdf.ln(4)
     pdf.set_font_size(9)
     names = ", ".join(n for n in op_names_from(config) if n)
-    pdf.multi_cell(0, 5, text(f"Операторы: {names}"))
+    pdf.multi_cell(0, 5, text(f"Операторы ({term(mode, 'per_shift')}): {names}"))
 
-    target = os.path.join(export_dir(),
-                          f"shifts_pro_{year}-{month:02d}_{_stamp()}.pdf")
+    target = os.path.join(
+        export_dir(), f"shifts_pro_{year}-{month:02d}_{mode}_{_stamp()}.pdf")
     pdf.output(target)
     return target
 
