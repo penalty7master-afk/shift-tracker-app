@@ -648,12 +648,37 @@ class DBManager:
             self.conn.close()
         except Exception:
             pass
-        shutil.copyfile(source_path, self.db_path)
+
+        # Запасная копия текущей базы. Без неё неудачная подмена оставляла
+        # приложение и без старых данных, и без рабочего соединения.
+        rescue = self.db_path + ".rescue"
+        if os.path.exists(self.db_path):
+            shutil.copyfile(self.db_path, rescue)
+
+        # Хвосты журнала удаляются ДО копирования: иначе новый файл базы
+        # какое-то время лежит рядом с журналом от прежней.
         for suffix in ("-wal", "-shm"):
             stale = self.db_path + suffix
             if os.path.exists(stale):
                 os.remove(stale)
-        self.reconnect()
+
+        try:
+            shutil.copyfile(source_path, self.db_path)
+            self.reconnect()
+        except Exception:
+            # Откат к прежней базе. reconnect() обязателен в любом случае:
+            # без него дальше падал бы каждый запрос до перезапуска.
+            if os.path.exists(rescue):
+                shutil.copyfile(rescue, self.db_path)
+            for suffix in ("-wal", "-shm"):
+                stale = self.db_path + suffix
+                if os.path.exists(stale):
+                    os.remove(stale)
+            self.reconnect()
+            raise
+        finally:
+            if os.path.exists(rescue):
+                os.remove(rescue)
 
 
 db = DBManager()
