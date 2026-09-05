@@ -27,6 +27,11 @@ SWITCHER_MS = 140
 # прокрутки, а вычисленная высота зависела бы от того, как лягут шрифты.
 HEADER_CARD_HEIGHT = 104
 NAV_CARD_HEIGHT = 52
+HEADER_KEY_SIZE = 48
+
+# Навигация — маленькая таблетка: сильное размытие делало её матовой,
+# тогда как широкая шапка при том же значении выглядит прозрачной.
+NAV_BLUR = 9
 
 # Жёсткий зазор между панелью и ближайшей карточкой — одинаков на любом
 # устройстве, меняется только системная часть отступа.
@@ -60,11 +65,15 @@ def main(page: ft.Page):
     salary_text = theme.text("0 ₽", role="accent", size=30,
                              weight=ft.FontWeight.BOLD)
     stats_subtext = theme.text("", role="dim", size=11)
-    settings_button = theme.icon_button(ft.Icons.SETTINGS, role="accent",
-                                        on_click=lambda e: show_settings())
-    today_button = theme.icon_button(ft.Icons.TODAY, role="accent",
-                                     tooltip="Отметить сегодня",
-                                     on_click=lambda e: mark_today())
+    # Круглые стеклянные кнопки вместо IconButton: у того активная зона
+    # была немногим больше самой иконки, и попасть по шестерёнке с первого
+    # раза не получалось. Здесь зона нажатия — весь круг 48 px.
+    settings_button = theme.glass_key(
+        theme.icon(ft.Icons.SETTINGS, role="accent", size=25),
+        lambda: show_settings(), size=HEADER_KEY_SIZE)
+    today_button = theme.glass_key(
+        theme.icon(ft.Icons.CHECK_CIRCLE_OUTLINE, role="accent", size=25),
+        lambda: mark_today(), size=HEADER_KEY_SIZE)
 
     header_card = theme.card(
         ft.Row([
@@ -72,9 +81,12 @@ def main(page: ft.Page):
                 theme.text("КАЛЕНДАРЬ СМЕН PRO", role="faint", size=11),
                 salary_text, stats_subtext,
             ], spacing=1, expand=True),
-            ft.Column([today_button, settings_button], spacing=0, tight=True),
+            # Обе кнопки в ряд и по центру карточки по вертикали:
+            # столбиком шестерёнка проваливалась к нижнему краю.
+            ft.Row([today_button, settings_button], spacing=8, tight=True,
+                   vertical_alignment=ft.CrossAxisAlignment.CENTER),
         ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-            vertical_alignment=ft.CrossAxisAlignment.START),
+            vertical_alignment=ft.CrossAxisAlignment.CENTER),
         blur=True, height=HEADER_CARD_HEIGHT, stretch=False,
     )
 
@@ -190,8 +202,8 @@ def main(page: ft.Page):
             make_nav_item(0, ft.Icons.CALENDAR_MONTH, "Календарь"),
             make_nav_item(1, ft.Icons.BAR_CHART, "Аналитика"),
         ], alignment=ft.MainAxisAlignment.CENTER, spacing=10),
-        blur=True, padding=6, border_radius=26, height=NAV_CARD_HEIGHT,
-        stretch=False,
+        blur=True, blur_sigma=NAV_BLUR, padding=6, border_radius=26,
+        height=NAV_CARD_HEIGHT, stretch=False,
     )
     paint_nav(0)
 
@@ -262,7 +274,8 @@ def main(page: ft.Page):
     def update_comparison(current_net):
         """Сравнение с прошлым месяцем — один дополнительный запрос."""
         year, month = prev_month(ctx.view["year"], ctx.view["month"])
-        previous = month_summary(db.get_month_shifts(year, month), config)
+        previous = month_summary(db.get_month_shifts(year, month, mode_of(config)),
+                                 config)
         if not previous["shifts"] and not previous["premium_paid"]:
             ctx.compare_text = ""
             return
@@ -274,7 +287,7 @@ def main(page: ft.Page):
         """Единственное чтение месяца из БД — им пользуются все экраны."""
         year, month = ctx.view["year"], ctx.view["month"]
         mode = mode_of(config)
-        ctx.month_data = db.get_month_shifts(year, month)
+        ctx.month_data = db.get_month_shifts(year, month, mode)
         # Производство и трекер читаются только по текущему режиму:
         # дневные и ночные записи лежат раздельно и не смешиваются.
         ctx.production_data = db.get_month_production(year, month, mode)
@@ -312,7 +325,7 @@ def main(page: ft.Page):
         ctx.touch()
         today = date.today()
         date_str = today.strftime("%Y-%m-%d")
-        existing = db.get_shift(date_str) or {}
+        existing = db.get_shift(date_str, mode_of(config)) or {}
         if existing.get("status") == STATUS_WORK:
             haptics.warn()
             return
