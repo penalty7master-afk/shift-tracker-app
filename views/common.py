@@ -125,6 +125,7 @@ def info_dialog(ctx, title, message):
             "Понятно",
             on_click=lambda e: close_dialog(ctx.page, dialog, ctx))],
     )
+    style_dialog(th, dialog)
     open_dialog(ctx.page, dialog, ctx)
     return dialog
 
@@ -151,15 +152,44 @@ def confirm_dialog(ctx, title, message, on_confirm, confirm_label="Удалит�
                           style=ft.ButtonStyle(color="#f87171") if danger else None),
         ],
     )
+    style_dialog(th, dialog)
     open_dialog(ctx.page, dialog, ctx)
     return dialog
 
 
-def dialog_width(page, maximum=520):
-    """Модалка считается от ширины экрана. Прежние 360 при отступе 48
-    давали на 720p всего 312 px — окно выглядело узкой полоской."""
+def style_dialog(th, dialog):
+    """
+    Модалка в общей гамме: системный чёрный прямоугольник выбивался из
+    палитры. Значения вычисляются лениво и присваиваются по одному — набор
+    полей AlertDialog и вспомогательных классов отличается между сборками.
+    """
+    recipes = (
+        ("bgcolor", lambda: th.dialog_bgcolor()),
+        ("surface_tint_color", lambda: "#00000000"),
+        ("shape", lambda: ft.RoundedRectangleBorder(radius=22)),
+        ("inset_padding", lambda: ft.Padding.symmetric(horizontal=10, vertical=26)),
+        ("content_padding",
+         lambda: ft.Padding.only(top=8, left=14, right=14, bottom=4)),
+        ("title_padding",
+         lambda: ft.Padding.only(top=18, left=18, right=18, bottom=2)),
+        ("actions_padding",
+         lambda: ft.Padding.only(left=8, right=8, bottom=6, top=2)),
+    )
+    for name, make in recipes:
+        try:
+            setattr(dialog, name, make())
+        except Exception:
+            continue
+    return dialog
+
+
+def dialog_width(page, maximum=560):
+    """
+    Полезная ширина содержимого модалки. Вычитаются inset_padding (по 10)
+    и content_padding (по 14) — иначе поле выработки уезжало за правый край.
+    """
     width = page.width or 380
-    return int(min(maximum, max(300, width - 24)))
+    return int(min(maximum, max(280, width - 2 * (10 + 14))))
 
 
 def dialog_height(page, maximum=680):
