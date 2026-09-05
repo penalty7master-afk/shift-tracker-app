@@ -17,6 +17,12 @@ from views.common import (bind_event, confirm_dialog, info_dialog, refresh_tree,
 
 BACK_KEY_SIZE = 46
 SWATCH_SIZE = 42
+PRODUCT_ROW_HEIGHT = 34
+CYCLE_FIELD_WIDTH = 168
+
+# Боковой отступ карточек — тот же, что у календаря и аналитики в ui.py.
+SIDE_PADDING = 10
+MAX_CONTENT_WIDTH = 620
 
 
 class SettingsView:
@@ -45,9 +51,11 @@ class SettingsView:
                                    text_align=ft.TextAlign.CENTER)
                           for i in range(1, 5)]
 
-        self.cycle_field = th.field(label="Старт графика (ГГГГ-ММ-ДД)")
+        self.cycle_field = th.field(label="Старт графика",
+                                    width=CYCLE_FIELD_WIDTH,
+                                    hint_text="ГГГГ-ММ-ДД")
         bind_event(self.cycle_field, self._validate_cycle, "on_blur")
-        self.cycle_hint = th.text("", role="faint", size=10)
+        self.cycle_hint = th.text("", role="faint", size=10, expand=True)
 
         self.norm1_field = th.field(label=SHOP_TITLES[SHOP1], expand=True,
                                     keyboard_type=ft.KeyboardType.NUMBER)
@@ -68,7 +76,7 @@ class SettingsView:
             ft.Icon(ft.Icons.ARROW_BACK, size=20, color=th.color("text")),
             self._back, size=BACK_KEY_SIZE)
 
-        self.control = ft.Column([
+        self.scroll_column = ft.Column([
             ft.SafeArea(content=ft.Container(
                 padding=ft.Padding.only(top=8, bottom=4, left=6),
                 content=ft.Row([
@@ -102,8 +110,10 @@ class SettingsView:
                 th.text("Операторы и их график", size=12, weight=ft.FontWeight.BOLD),
                 ft.Row([self.op_fields[0], self.op_fields[1]], spacing=8),
                 ft.Row([self.op_fields[2], self.op_fields[3]], spacing=8),
-                self.cycle_field,
-                self.cycle_hint,
+                # Поле короткое — освободившееся место справа занимает
+                # пояснение, которое раньше отнимало отдельную строку.
+                ft.Row([self.cycle_field, self.cycle_hint], spacing=10,
+                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ], spacing=10, tight=True)),
 
             th.card(ft.Column([
@@ -125,6 +135,7 @@ class SettingsView:
                 ft.Row([self.new_product_input, self.add_product_button], spacing=8),
                 th.divider(),
                 self.products_list,
+                self.fill_button,
             ], spacing=10, tight=True)),
 
             th.card(ft.Column([
@@ -145,6 +156,16 @@ class SettingsView:
                    alignment=ft.MainAxisAlignment.CENTER),
             ft.Container(height=90),
         ], spacing=14, scroll=ft.ScrollMode.AUTO, expand=True)
+
+        # Карточки упирались в края экрана, тогда как в календаре и
+        # аналитике у них есть боковой отступ. Ширина ограничена сверху,
+        # чтобы на планшете колонка не расползалась во весь экран.
+        self.control = ft.Container(
+            expand=True, alignment=ft.Alignment.TOP_CENTER,
+            padding=ft.Padding.symmetric(horizontal=SIDE_PADDING),
+            content=ft.Container(expand=True, width=MAX_CONTENT_WIDTH,
+                                 content=self.scroll_column),
+        )
 
     # ---------- режим смены ----------
     def _build_mode(self):
@@ -183,13 +204,17 @@ class SettingsView:
         # переключение ничего не теряет и не требует подтверждения.
         db.save_config(shift_mode=mode)
         self.ctx.config.update(db.get_config())
+        # Ставка своя у каждого режима: без перечитывания поле осталось бы
+        # со старым числом и затёрло бы настройку нового режима.
+        self.rate_field.value = str(self.ctx.config[self._rate_key()])
+        self.rate_field.error_text = None
         self._paint_mode()
         self._sync_mode_labels()
         # Календарь, аналитика и модалка пересобираются под новый режим.
         self.ctx.rebuild_for_mode()
         refresh_tree(self.mode_row, self.mode_hint, self.rate_field,
                      self.rate_hint, self.norm_title, self.cycle_hint,
-                     self.control)
+                     self.scroll_column)
 
     def _paint_mode(self):
         th = self.th
@@ -360,7 +385,7 @@ class SettingsView:
         self.simple_bg_switch.active_color = self.th.accent()
         self.haptics_switch.active_color = self.th.accent()
         refresh_tree(self.accent_row, self.bg_column, self.tax_row,
-                     self.mode_row, self.products_list, self.control)
+                     self.mode_row, self.products_list, self.scroll_column)
 
     def _paint_theme_selection(self):
         th = self.th
@@ -390,7 +415,9 @@ class SettingsView:
         self.new_product_input = th.field(label="Новый продукт", expand=True)
         self.add_product_button = ft.ElevatedButton("Добавить",
                                                     on_click=self._add_product)
-        self.products_list = ft.Column(spacing=4, tight=True)
+        self.products_list = ft.Column(spacing=2, tight=True)
+        self.fill_button = ft.TextButton("Заполнить типовыми",
+                                         on_click=self._fill_products)
 
     def _refresh_products(self):
         """Подтверждение удаления показывается прямо в строке: диалог
@@ -400,7 +427,7 @@ class SettingsView:
         short = term(mode, "shifts_short")
         controls = []
         for name in db.get_products():
-            label = ft.Text(name, size=12, color=th.color("text"), expand=True)
+            label = ft.Text(name, size=14, color=th.color("text"), expand=True)
 
             if self.pending_delete == name:
                 used = db.product_usage_count(name)
@@ -413,13 +440,26 @@ class SettingsView:
                 ], spacing=2, vertical_alignment=ft.CrossAxisAlignment.CENTER))
                 continue
 
-            controls.append(ft.Row([
+            # height у строки: стандартный IconButton держал 48 px, и семь
+            # позиций растягивали карточку на полтора экрана.
+            controls.append(ft.Container(height=PRODUCT_ROW_HEIGHT, content=ft.Row([
                 label,
                 ft.IconButton(ft.Icons.DELETE_OUTLINE, icon_color="#fca5a5",
-                              icon_size=20,
+                              icon_size=18, padding=0,
                               on_click=lambda e, n=name: self._ask_delete(n)),
-            ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER))
+            ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER)))
+
+        self.fill_button.visible = not controls
         self.products_list.controls = controls
+
+    def _fill_products(self, e=None):
+        """Каталог при установке пуст: список наименований у каждого свой."""
+        touch(self.ctx)
+        db.fill_default_products()
+        haptics.confirm()
+        self.pending_delete = None
+        self._refresh_products()
+        refresh_tree(self.products_list, self.fill_button)
 
     def _ask_delete(self, name):
         touch(self.ctx)
