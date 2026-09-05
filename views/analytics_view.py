@@ -38,7 +38,10 @@ class AnalyticsView:
         self.money_rows = ft.Column(spacing=6, tight=True)
         self.production_rows = ft.Column(spacing=10, tight=True)
         self.operator_rows = ft.Column(spacing=10, tight=True)
-        self.year_bars = ft.Row(spacing=4, tight=True,
+        # Без tight: Row занимает всю ширину карточки, иначе карточка года
+        # сжималась по двенадцати столбикам и была уже остальных.
+        self.year_bars = ft.Row(spacing=4,
+                                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                                 vertical_alignment=ft.CrossAxisAlignment.END)
         self.year_title = th.text("", size=12, weight=ft.FontWeight.BOLD)
         self.year_total = th.text("", role="dim", size=11)
@@ -72,8 +75,9 @@ class AnalyticsView:
                 ft.Container(self.year_bars, height=BAR_HEIGHT + 26),
                 self.year_total,
             ], spacing=10, tight=True), padding=14),
-
-            ft.Container(height=20),
+            # Запас снизу убран: теперь отступ под навигацией даёт распорка,
+            # которую ui.py вставляет в конец колонки. Два запаса подряд
+            # давали двойное пустое место.
         ], spacing=10, scroll=ft.ScrollMode.AUTO, expand=True)
 
     # ==========================================
