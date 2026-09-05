@@ -6,7 +6,7 @@ import sqlite3
 from calculations import sort_products
 from constants import (DEFAULT_ACCENT, DEFAULT_BG_THEME, DEFAULT_CYCLE_START,
                        DEFAULT_DAY_HOUR_RATE, DEFAULT_HOUR_RATE,
-                       DEFAULT_NORM_SHOP1, DEFAULT_NORM_SHOP2,
+                       DEFAULT_NORM_SHOP1, DEFAULT_NORM_SHOP2, DEFAULT_PRODUCTS,
                        DEFAULT_SHIFT_MODE, DEFAULT_TAX, MODE_DAY, MODE_NIGHT)
 
 PBKDF2_ROUNDS = 100_000
@@ -88,13 +88,14 @@ class DBManager:
         cur = self.conn.cursor()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS shifts (
-                date TEXT PRIMARY KEY,
+                date TEXT,
+                shift_mode TEXT,
                 hours REAL,
                 status TEXT,
                 arrival_status TEXT,
                 note TEXT,
                 premium_pay REAL,
-                shift_mode TEXT
+                PRIMARY KEY (date, shift_mode)
             )
         """)
         cur.execute("""
@@ -143,6 +144,12 @@ class DBManager:
                 mode_chosen INTEGER
             )
         """)
+        self.conn.commit()
+
+    def _create_indexes(self):
+        """Отдельным шагом после миграции: в базе прежней версии колонки
+        shift_mode ещё нет, и создание индекса по ней падало на старте."""
+        cur = self.conn.cursor()
         cur.execute("CREATE INDEX IF NOT EXISTS idx_timeline_date "
                     "ON timeline(date, shift_mode)")
         self.conn.commit()
@@ -184,9 +191,46 @@ class DBManager:
         cur.execute("UPDATE shifts SET shift_mode=? WHERE shift_mode IS NULL",
                     (MODE_NIGHT,))
 
+        self._migrate_shifts()
         self._migrate_production()
         self._migrate_timeline()
         self.conn.commit()
+        self._create_indexes()
+
+    def _migrate_shifts(self):
+        """
+        Ключом была одна дата, поэтому дневная смена затирала ночную за то
+        же число. Ключ становится составным — ALTER TABLE такого не умеет,
+        таблица пересоздаётся с переносом данных.
+        """
+        cur = self.conn.cursor()
+        row = cur.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='shifts'"
+        ).fetchone()
+        if row and "PRIMARY KEY (date, shift_mode)" in (row[0] or ""):
+            return
+
+        cur.execute("ALTER TABLE shifts RENAME TO shifts_old")
+        cur.execute("""
+            CREATE TABLE shifts (
+                date TEXT,
+                shift_mode TEXT,
+                hours REAL,
+                status TEXT,
+                arrival_status TEXT,
+                note TEXT,
+                premium_pay REAL,
+                PRIMARY KEY (date, shift_mode)
+            )
+        """)
+        cur.execute("""
+            INSERT INTO shifts (date, shift_mode, hours, status,
+                                arrival_status, note, premium_pay)
+            SELECT date, COALESCE(shift_mode, ?), hours, status,
+                   arrival_status, note, premium_pay
+            FROM shifts_old
+        """, (MODE_NIGHT,))
+        cur.execute("DROP TABLE shifts_old")
 
     def _migrate_production(self):
         """
@@ -227,13 +271,17 @@ class DBManager:
                     (MODE_NIGHT,))
 
     def init_default_products(self):
-        cur = self.conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM products")
-        if cur.fetchone()[0] == 0:
-            cur.executemany("INSERT INTO products (name) VALUES (?)",
-                            [("90",), ("90 ПВ",), ("200",), ("200 ПВ",),
-                             ("500",), ("500 ПВ",), ("Предпомол",)])
-            self.conn.commit()
+        """Каталог намеренно пуст: типовые позиции добавляются кнопкой
+        в настройках, чтобы не навязывать чужой список наименований."""
+        return
+
+    def fill_default_products(self):
+        """Возвращает число реально добавленных позиций."""
+        added = 0
+        for name in DEFAULT_PRODUCTS:
+            if self.add_product(name):
+                added += 1
+        return added
 
     def init_default_config(self):
         cur = self.conn.cursor()
@@ -335,40 +383,51 @@ class DBManager:
                    note=None, premium_pay=None, shift_mode=None):
         cur = self.conn.cursor()
         cur.execute("""
-            INSERT INTO shifts (date, hours, status, arrival_status,
-                                note, premium_pay, shift_mode)
+            INSERT INTO shifts (date, shift_mode, hours, status,
+                                arrival_status, note, premium_pay)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(date) DO UPDATE SET
+            ON CONFLICT(date, shift_mode) DO UPDATE SET
                 hours=excluded.hours,
                 status=excluded.status,
                 arrival_status=excluded.arrival_status,
                 note=excluded.note,
-                premium_pay=excluded.premium_pay,
-                shift_mode=excluded.shift_mode
-        """, (date_str, hours, status, arrival_status, note, premium_pay,
-              _mode(shift_mode)))
+                premium_pay=excluded.premium_pay
+        """, (date_str, _mode(shift_mode), hours, status, arrival_status,
+              note, premium_pay))
         self.conn.commit()
 
-    def delete_shift(self, date_str):
+    def delete_shift(self, date_str, shift_mode=None):
+        """shift_mode=None — удаляются записи обоих режимов."""
         cur = self.conn.cursor()
-        cur.execute("DELETE FROM shifts WHERE date=?", (date_str,))
+        if shift_mode is None:
+            cur.execute("DELETE FROM shifts WHERE date=?", (date_str,))
+        else:
+            cur.execute("DELETE FROM shifts WHERE date=? AND shift_mode=?",
+                        (date_str, _mode(shift_mode)))
         self.conn.commit()
 
     def delete_day(self, date_str, shift_mode=None):
         """Очистка дня: моя смена, производство и хронология этого режима."""
         mode = _mode(shift_mode)
         cur = self.conn.cursor()
-        cur.execute("DELETE FROM shifts WHERE date=?", (date_str,))
+        cur.execute("DELETE FROM shifts WHERE date=? AND shift_mode=?",
+                    (date_str, mode))
         cur.execute("DELETE FROM production WHERE date=? AND shift_mode=?",
                     (date_str, mode))
         cur.execute("DELETE FROM timeline WHERE date=? AND shift_mode=?",
                     (date_str, mode))
         self.conn.commit()
 
-    def get_shift(self, date_str):
+    def get_shift(self, date_str, shift_mode=None):
+        """shift_mode=None — любая запись за дату (нужно только выгрузке)."""
         cur = self.conn.cursor()
-        cur.execute(f"SELECT {self.SHIFT_FIELDS} FROM shifts WHERE date=?",
-                    (date_str,))
+        if shift_mode is None:
+            cur.execute(f"SELECT {self.SHIFT_FIELDS} FROM shifts WHERE date=? "
+                        "ORDER BY shift_mode LIMIT 1", (date_str,))
+        else:
+            cur.execute(f"SELECT {self.SHIFT_FIELDS} FROM shifts "
+                        "WHERE date=? AND shift_mode=?",
+                        (date_str, _mode(shift_mode)))
         row = cur.fetchone()
         return self._row_to_shift(row) if row else None
 
@@ -379,19 +438,25 @@ class DBManager:
         end_month = 1 if month == 12 else month + 1
         return start, f"{end_year}-{end_month:02d}-01"
 
-    def _shifts_range(self, start, end):
+    def _shifts_range(self, start, end, shift_mode=None):
         cur = self.conn.cursor()
         # Диапазон вместо LIKE — гарантированный range-scan по ключу.
-        cur.execute(f"SELECT date, {self.SHIFT_FIELDS} FROM shifts "
-                    "WHERE date >= ? AND date < ?", (start, end))
+        if shift_mode is None:
+            cur.execute(f"SELECT date, {self.SHIFT_FIELDS} FROM shifts "
+                        "WHERE date >= ? AND date < ?", (start, end))
+        else:
+            cur.execute(f"SELECT date, {self.SHIFT_FIELDS} FROM shifts "
+                        "WHERE date >= ? AND date < ? AND shift_mode=?",
+                        (start, end, _mode(shift_mode)))
         return {r[0]: self._row_to_shift(r[1:]) for r in cur.fetchall()}
 
-    def get_month_shifts(self, year, month):
+    def get_month_shifts(self, year, month, shift_mode=None):
         start, end = self._month_bounds(year, month)
-        return self._shifts_range(start, end)
+        return self._shifts_range(start, end, shift_mode)
 
-    def get_year_shifts(self, year):
-        return self._shifts_range(f"{year}-01-01", f"{year + 1}-01-01")
+    def get_year_shifts(self, year, shift_mode=None):
+        return self._shifts_range(f"{year}-01-01", f"{year + 1}-01-01",
+                                  shift_mode)
 
     # ==========================================
     # ПРОИЗВОДСТВО ЗА СМЕНУ
