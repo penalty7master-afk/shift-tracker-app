@@ -2,6 +2,7 @@ import time
 
 import flet as ft
 
+import haptics
 from database import db
 from views.common import refresh_tree, safe_update
 
@@ -205,12 +206,14 @@ class PinView:
     def _press(self, digit):
         remaining = self._remaining_lock()
         if remaining:
+            haptics.warn()
             self.error.value = f"Слишком много попыток. Подождите {remaining} с"
             self._refresh()
             return
         if len(self.digits) >= MAX_PIN:
             return
 
+        haptics.tap()
         self.digits += digit
         self.error.value = ""
         self._paint_dots()
@@ -224,6 +227,7 @@ class PinView:
     def _backspace(self):
         if not self.digits:
             return
+        haptics.tap()
         self.digits = self.digits[:-1]
         self.error.value = ""
         self._paint_dots()
@@ -244,6 +248,7 @@ class PinView:
         короткие PIN-коды. Попытку тратим только когда набраны все шесть.
         """
         if db.verify_pin(self.digits):
+            haptics.confirm()
             self.attempts = 0
             self.lockouts = 0
             self._reset_input()
@@ -254,6 +259,7 @@ class PinView:
         if len(self.digits) < MAX_PIN:
             return
 
+        haptics.error()
         delay = self._register_failure()
         if delay:
             self.error.value = f"Вход заблокирован на {delay} с"
@@ -270,6 +276,7 @@ class PinView:
             return
 
         if self.mode == "setup_new":
+            haptics.select()
             self.first_pin = self.digits
             self.mode = "setup_confirm"
             self.title.value = "Повторите PIN-код"
@@ -282,6 +289,7 @@ class PinView:
         if self.digits == self.first_pin:
             # Старый хеш перезаписывается только здесь: до этого момента
             # приложение остаётся защищённым прежним PIN-кодом.
+            haptics.confirm()
             db.set_pin(self.digits)
             self.ctx.config.update(db.get_config())
             self._reset_input()
@@ -289,6 +297,7 @@ class PinView:
             self.on_success()
             return
 
+        haptics.error()
         self.mode = "setup_new"
         self.first_pin = None
         self.title.value = "Придумайте PIN-код"
