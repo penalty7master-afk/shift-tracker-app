@@ -5,18 +5,22 @@ import sqlite3
 
 from calculations import sort_products
 from constants import (DEFAULT_ACCENT, DEFAULT_BG_THEME, DEFAULT_CYCLE_START,
-                       DEFAULT_NORM_SHOP1, DEFAULT_NORM_SHOP2, DEFAULT_TAX)
+                       DEFAULT_DAY_HOUR_RATE, DEFAULT_HOUR_RATE,
+                       DEFAULT_NORM_SHOP1, DEFAULT_NORM_SHOP2,
+                       DEFAULT_SHIFT_MODE, DEFAULT_TAX, MODE_DAY, MODE_NIGHT)
 
 PBKDF2_ROUNDS = 100_000
 
 CONFIG_WRITABLE = (
-    "hour_rate", "theme", "bg_theme", "op1", "op2", "op3", "op4",
+    "hour_rate", "day_hour_rate", "theme", "bg_theme",
+    "op1", "op2", "op3", "op4",
     "tax_rate", "cycle_start", "simple_bg", "norm_shop1", "norm_shop2",
-    "haptics",
+    "haptics", "shift_mode", "mode_chosen",
 )
 
 CONFIG_DEFAULTS = {
-    "hour_rate": 632.0,
+    "hour_rate": DEFAULT_HOUR_RATE,
+    "day_hour_rate": DEFAULT_DAY_HOUR_RATE,
     "theme": DEFAULT_ACCENT,
     "bg_theme": DEFAULT_BG_THEME,
     "op1": "Оператор 1",
@@ -29,7 +33,13 @@ CONFIG_DEFAULTS = {
     "norm_shop1": DEFAULT_NORM_SHOP1,
     "norm_shop2": DEFAULT_NORM_SHOP2,
     "haptics": 1,
+    "shift_mode": DEFAULT_SHIFT_MODE,
+    "mode_chosen": 0,          # 1 после выбора режима на первом запуске
 }
+
+
+def _mode(value):
+    return value if value in (MODE_NIGHT, MODE_DAY) else DEFAULT_SHIFT_MODE
 
 
 # ==========================================
@@ -37,9 +47,11 @@ CONFIG_DEFAULTS = {
 # ==========================================
 class DBManager:
     """
-    Две независимые сущности:
-      shifts     — мой день (работал / выходной / проспал, часы, приход, заметка);
-      production — ночь производства (оператор, продукт и кг по каждому цеху).
+    Три сущности:
+      shifts     — мой день (режим хранится в колонке shift_mode);
+      production — выработка смены, ключ (дата + режим): цех работает
+                   круглосуточно, за одну дату бывают и день, и ночь;
+      timeline   — хронология, тоже с привязкой к режиму.
     """
 
     def __init__(self):
@@ -81,17 +93,20 @@ class DBManager:
                 status TEXT,
                 arrival_status TEXT,
                 note TEXT,
-                premium_pay REAL
+                premium_pay REAL,
+                shift_mode TEXT
             )
         """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS production (
-                date TEXT PRIMARY KEY,
+                date TEXT,
+                shift_mode TEXT,
                 operator TEXT,
                 product1 TEXT,
                 weight1 REAL,
                 product2 TEXT,
-                weight2 REAL
+                weight2 REAL,
+                PRIMARY KEY (date, shift_mode)
             )
         """)
         cur.execute("""
@@ -103,6 +118,7 @@ class DBManager:
             CREATE TABLE IF NOT EXISTS timeline (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 date TEXT,
+                shift_mode TEXT,
                 event_time TEXT,
                 event_type TEXT
             )
@@ -111,6 +127,7 @@ class DBManager:
             CREATE TABLE IF NOT EXISTS app_config (
                 id INTEGER PRIMARY KEY,
                 hour_rate REAL,
+                day_hour_rate REAL,
                 theme TEXT,
                 bg_theme TEXT,
                 op1 TEXT, op2 TEXT, op3 TEXT, op4 TEXT,
@@ -121,26 +138,35 @@ class DBManager:
                 simple_bg INTEGER,
                 norm_shop1 REAL,
                 norm_shop2 REAL,
-                haptics INTEGER
+                haptics INTEGER,
+                shift_mode TEXT,
+                mode_chosen INTEGER
             )
         """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_timeline_date ON timeline(date)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_timeline_date "
+                    "ON timeline(date, shift_mode)")
         self.conn.commit()
+
+    def _columns(self, table):
+        cur = self.conn.cursor()
+        return {r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()}
 
     def _ensure_columns(self, table, columns):
         cur = self.conn.cursor()
-        existing = {r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()}
+        existing = self._columns(table)
         for name, ddl in columns.items():
             if name not in existing:
                 cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
     def migrate(self):
-        """Достраивает колонки в базах прежних версий."""
+        """Достраивает колонки и, если нужно, пересобирает таблицы."""
         self._ensure_columns("shifts", {
             "note": "TEXT",
             "premium_pay": "REAL",
+            "shift_mode": "TEXT",
         })
         self._ensure_columns("app_config", {
+            "day_hour_rate": "REAL",
             "bg_theme": "TEXT",
             "pin_salt": "TEXT",
             "tax_rate": "REAL",
@@ -149,8 +175,56 @@ class DBManager:
             "norm_shop1": "REAL",
             "norm_shop2": "REAL",
             "haptics": "INTEGER",
+            "shift_mode": "TEXT",
+            "mode_chosen": "INTEGER",
         })
+
+        cur = self.conn.cursor()
+        # Всё, что записано до появления режимов, считаем ночным.
+        cur.execute("UPDATE shifts SET shift_mode=? WHERE shift_mode IS NULL",
+                    (MODE_NIGHT,))
+
+        self._migrate_production()
+        self._migrate_timeline()
         self.conn.commit()
+
+    def _migrate_production(self):
+        """
+        Раньше ключом была одна дата, поэтому за 1 сентября могла
+        существовать только одна запись. Ключ становится составным —
+        ALTER TABLE такого не умеет, таблица пересоздаётся с переносом.
+        """
+        if "shift_mode" in self._columns("production"):
+            return
+        cur = self.conn.cursor()
+        cur.execute("ALTER TABLE production RENAME TO production_old")
+        cur.execute("""
+            CREATE TABLE production (
+                date TEXT,
+                shift_mode TEXT,
+                operator TEXT,
+                product1 TEXT,
+                weight1 REAL,
+                product2 TEXT,
+                weight2 REAL,
+                PRIMARY KEY (date, shift_mode)
+            )
+        """)
+        cur.execute("""
+            INSERT INTO production (date, shift_mode, operator,
+                                    product1, weight1, product2, weight2)
+            SELECT date, ?, operator, product1, weight1, product2, weight2
+            FROM production_old
+        """, (MODE_NIGHT,))
+        cur.execute("DROP TABLE production_old")
+
+    def _migrate_timeline(self):
+        if "shift_mode" in self._columns("timeline"):
+            return
+        cur = self.conn.cursor()
+        cur.execute("ALTER TABLE timeline ADD COLUMN shift_mode TEXT")
+        cur.execute("UPDATE timeline SET shift_mode=? WHERE shift_mode IS NULL",
+                    (MODE_NIGHT,))
 
     def init_default_products(self):
         cur = self.conn.cursor()
@@ -180,11 +254,14 @@ class DBManager:
             if cfg.get(key) in (None, ""):
                 cfg[key] = default
         cfg["hour_rate"] = float(cfg["hour_rate"])
+        cfg["day_hour_rate"] = float(cfg["day_hour_rate"])
         cfg["tax_rate"] = float(cfg["tax_rate"])
         cfg["norm_shop1"] = float(cfg["norm_shop1"])
         cfg["norm_shop2"] = float(cfg["norm_shop2"])
         cfg["simple_bg"] = int(cfg["simple_bg"] or 0)
         cfg["haptics"] = int(cfg["haptics"] if cfg.get("haptics") is not None else 1)
+        cfg["mode_chosen"] = int(cfg["mode_chosen"] or 0)
+        cfg["shift_mode"] = _mode(cfg.get("shift_mode"))
         cfg.setdefault("pin_hash", None)
         cfg.setdefault("pin_salt", None)
         return cfg
@@ -247,26 +324,29 @@ class DBManager:
     # ==========================================
     # МОЙ ДЕНЬ
     # ==========================================
-    SHIFT_FIELDS = "hours, status, arrival_status, note, premium_pay"
+    SHIFT_FIELDS = "hours, status, arrival_status, note, premium_pay, shift_mode"
 
     @staticmethod
     def _row_to_shift(row):
         return {"hours": row[0], "status": row[1], "arrival_status": row[2],
-                "note": row[3], "premium_pay": row[4]}
+                "note": row[3], "premium_pay": row[4], "shift_mode": row[5]}
 
     def save_shift(self, date_str, hours, status, arrival_status,
-                   note=None, premium_pay=None):
+                   note=None, premium_pay=None, shift_mode=None):
         cur = self.conn.cursor()
         cur.execute("""
-            INSERT INTO shifts (date, hours, status, arrival_status, note, premium_pay)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO shifts (date, hours, status, arrival_status,
+                                note, premium_pay, shift_mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(date) DO UPDATE SET
                 hours=excluded.hours,
                 status=excluded.status,
                 arrival_status=excluded.arrival_status,
                 note=excluded.note,
-                premium_pay=excluded.premium_pay
-        """, (date_str, hours, status, arrival_status, note, premium_pay))
+                premium_pay=excluded.premium_pay,
+                shift_mode=excluded.shift_mode
+        """, (date_str, hours, status, arrival_status, note, premium_pay,
+              _mode(shift_mode)))
         self.conn.commit()
 
     def delete_shift(self, date_str):
@@ -274,17 +354,21 @@ class DBManager:
         cur.execute("DELETE FROM shifts WHERE date=?", (date_str,))
         self.conn.commit()
 
-    def delete_day(self, date_str):
-        """Полная очистка дня: моя смена, производство и хронология."""
+    def delete_day(self, date_str, shift_mode=None):
+        """Очистка дня: моя смена, производство и хронология этого режима."""
+        mode = _mode(shift_mode)
         cur = self.conn.cursor()
         cur.execute("DELETE FROM shifts WHERE date=?", (date_str,))
-        cur.execute("DELETE FROM production WHERE date=?", (date_str,))
-        cur.execute("DELETE FROM timeline WHERE date=?", (date_str,))
+        cur.execute("DELETE FROM production WHERE date=? AND shift_mode=?",
+                    (date_str, mode))
+        cur.execute("DELETE FROM timeline WHERE date=? AND shift_mode=?",
+                    (date_str, mode))
         self.conn.commit()
 
     def get_shift(self, date_str):
         cur = self.conn.cursor()
-        cur.execute(f"SELECT {self.SHIFT_FIELDS} FROM shifts WHERE date=?", (date_str,))
+        cur.execute(f"SELECT {self.SHIFT_FIELDS} FROM shifts WHERE date=?",
+                    (date_str,))
         row = cur.fetchone()
         return self._row_to_shift(row) if row else None
 
@@ -297,7 +381,7 @@ class DBManager:
 
     def _shifts_range(self, start, end):
         cur = self.conn.cursor()
-        # Диапазон вместо LIKE — гарантированный range-scan по первичному ключу.
+        # Диапазон вместо LIKE — гарантированный range-scan по ключу.
         cur.execute(f"SELECT date, {self.SHIFT_FIELDS} FROM shifts "
                     "WHERE date >= ? AND date < ?", (start, end))
         return {r[0]: self._row_to_shift(r[1:]) for r in cur.fetchall()}
@@ -310,7 +394,7 @@ class DBManager:
         return self._shifts_range(f"{year}-01-01", f"{year + 1}-01-01")
 
     # ==========================================
-    # ПРОИЗВОДСТВО ЗА НОЧЬ
+    # ПРОИЗВОДСТВО ЗА СМЕНУ
     # ==========================================
     PRODUCTION_FIELDS = "operator, product1, weight1, product2, weight2"
 
@@ -320,48 +404,54 @@ class DBManager:
                 "product2": row[3], "weight2": row[4]}
 
     def save_production(self, date_str, operator, product1, weight1,
-                        product2, weight2):
-        """Если за ночь ничего не заполнено — запись удаляется."""
+                        product2, weight2, shift_mode=None):
+        """Если за смену ничего не заполнено — запись удаляется."""
+        mode = _mode(shift_mode)
         if not operator and weight1 is None and weight2 is None:
-            self.delete_production(date_str)
+            self.delete_production(date_str, mode)
             return
         cur = self.conn.cursor()
         cur.execute("""
-            INSERT INTO production (date, operator, product1, weight1, product2, weight2)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(date) DO UPDATE SET
+            INSERT INTO production (date, shift_mode, operator,
+                                    product1, weight1, product2, weight2)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date, shift_mode) DO UPDATE SET
                 operator=excluded.operator,
                 product1=excluded.product1,
                 weight1=excluded.weight1,
                 product2=excluded.product2,
                 weight2=excluded.weight2
-        """, (date_str, operator, product1, weight1, product2, weight2))
+        """, (date_str, mode, operator, product1, weight1, product2, weight2))
         self.conn.commit()
 
-    def delete_production(self, date_str):
+    def delete_production(self, date_str, shift_mode=None):
         cur = self.conn.cursor()
-        cur.execute("DELETE FROM production WHERE date=?", (date_str,))
+        cur.execute("DELETE FROM production WHERE date=? AND shift_mode=?",
+                    (date_str, _mode(shift_mode)))
         self.conn.commit()
 
-    def get_production(self, date_str):
+    def get_production(self, date_str, shift_mode=None):
         cur = self.conn.cursor()
-        cur.execute(f"SELECT {self.PRODUCTION_FIELDS} FROM production WHERE date=?",
-                    (date_str,))
+        cur.execute(f"SELECT {self.PRODUCTION_FIELDS} FROM production "
+                    "WHERE date=? AND shift_mode=?",
+                    (date_str, _mode(shift_mode)))
         row = cur.fetchone()
         return self._row_to_production(row) if row else None
 
-    def _production_range(self, start, end):
+    def _production_range(self, start, end, mode):
         cur = self.conn.cursor()
         cur.execute(f"SELECT date, {self.PRODUCTION_FIELDS} FROM production "
-                    "WHERE date >= ? AND date < ?", (start, end))
+                    "WHERE date >= ? AND date < ? AND shift_mode=?",
+                    (start, end, mode))
         return {r[0]: self._row_to_production(r[1:]) for r in cur.fetchall()}
 
-    def get_month_production(self, year, month):
+    def get_month_production(self, year, month, shift_mode=None):
         start, end = self._month_bounds(year, month)
-        return self._production_range(start, end)
+        return self._production_range(start, end, _mode(shift_mode))
 
-    def get_year_production(self, year):
-        return self._production_range(f"{year}-01-01", f"{year + 1}-01-01")
+    def get_year_production(self, year, shift_mode=None):
+        return self._production_range(f"{year}-01-01", f"{year + 1}-01-01",
+                                      _mode(shift_mode))
 
     # ---------- выгрузка ----------
     def get_all_dates(self):
@@ -371,44 +461,62 @@ class DBManager:
                     "ORDER BY date")
         return [r[0] for r in cur.fetchall()]
 
-    def get_month_dates(self, year, month):
+    def get_month_dates(self, year, month, shift_mode=None):
         """Даты месяца, по которым есть данные — для PDF-табеля."""
         start, end = self._month_bounds(year, month)
+        mode = _mode(shift_mode)
         cur = self.conn.cursor()
-        cur.execute("SELECT date FROM shifts WHERE date >= ? AND date < ? "
-                    "UNION SELECT date FROM production WHERE date >= ? AND date < ? "
-                    "ORDER BY date", (start, end, start, end))
+        cur.execute(
+            "SELECT date FROM shifts WHERE date >= ? AND date < ? "
+            "UNION "
+            "SELECT date FROM production "
+            "WHERE date >= ? AND date < ? AND shift_mode=? "
+            "ORDER BY date", (start, end, start, end, mode))
         return [r[0] for r in cur.fetchall()]
 
-    # ==========================================
-    # НОЧНОЙ ТРЕКЕР
-    # ==========================================
-    def add_timeline_event(self, date_str, event_type, event_time):
+    def production_rows_for_export(self, date_str):
+        """Все режимы за дату — CSV выгружает и день, и ночь."""
         cur = self.conn.cursor()
-        cur.execute("INSERT INTO timeline (date, event_time, event_type) VALUES (?, ?, ?)",
-                    (date_str, event_time, event_type))
+        cur.execute(f"SELECT shift_mode, {self.PRODUCTION_FIELDS} FROM production "
+                    "WHERE date=? ORDER BY shift_mode", (date_str,))
+        return [(r[0], self._row_to_production(r[1:])) for r in cur.fetchall()]
+
+    # ==========================================
+    # ТРЕКЕР СМЕНЫ
+    # ==========================================
+    def add_timeline_event(self, date_str, event_type, event_time,
+                           shift_mode=None):
+        cur = self.conn.cursor()
+        cur.execute("INSERT INTO timeline (date, shift_mode, event_time, event_type) "
+                    "VALUES (?, ?, ?, ?)",
+                    (date_str, _mode(shift_mode), event_time, event_type))
         self.conn.commit()
         return cur.lastrowid
 
-    def add_timeline_bulk(self, date_str, events):
+    def add_timeline_bulk(self, date_str, events, shift_mode=None):
+        mode = _mode(shift_mode)
         cur = self.conn.cursor()
-        cur.executemany("INSERT INTO timeline (date, event_time, event_type) VALUES (?, ?, ?)",
-                        [(date_str, t, e) for t, e in events])
+        cur.executemany(
+            "INSERT INTO timeline (date, shift_mode, event_time, event_type) "
+            "VALUES (?, ?, ?, ?)",
+            [(date_str, mode, t, e) for t, e in events])
         self.conn.commit()
 
-    def get_timeline(self, date_str):
+    def get_timeline(self, date_str, shift_mode=None):
         """Возвращает (id, время, тип) — id нужен для удаления события."""
         cur = self.conn.cursor()
         cur.execute("SELECT id, event_time, event_type FROM timeline "
-                    "WHERE date=? ORDER BY id ASC", (date_str,))
+                    "WHERE date=? AND shift_mode=? ORDER BY id ASC",
+                    (date_str, _mode(shift_mode)))
         return cur.fetchall()
 
-    def get_timeline_dates(self, year, month):
+    def get_timeline_dates(self, year, month, shift_mode=None):
         """Даты месяца, где есть хотя бы одно событие трекера."""
         start, end = self._month_bounds(year, month)
         cur = self.conn.cursor()
-        cur.execute("SELECT DISTINCT date FROM timeline WHERE date >= ? AND date < ?",
-                    (start, end))
+        cur.execute("SELECT DISTINCT date FROM timeline "
+                    "WHERE date >= ? AND date < ? AND shift_mode=?",
+                    (start, end, _mode(shift_mode)))
         return {r[0] for r in cur.fetchall()}
 
     def delete_timeline_events(self, event_ids):
@@ -424,7 +532,7 @@ class DBManager:
     # КАТАЛОГ ПРОДУКЦИИ
     # ==========================================
     def get_products(self):
-        """Сортировка по числу в названии: 90, 90 ПВ, 200, 200 ПВ, 500, 500 ПВ."""
+        """Сортировка по числу в названии: 90, 90 ПВ, 200, 200 ПВ, 500."""
         cur = self.conn.cursor()
         cur.execute("SELECT name FROM products")
         return sort_products([r[0] for r in cur.fetchall()])
@@ -439,7 +547,7 @@ class DBManager:
             return False
 
     def product_usage_count(self, name):
-        """Сколько ночей ссылается на продукт — спрашиваем перед удалением."""
+        """Сколько смен ссылается на продукт — спрашиваем перед удалением."""
         cur = self.conn.cursor()
         cur.execute("SELECT COUNT(*) FROM production WHERE product1=? OR product2=?",
                     (name, name))
