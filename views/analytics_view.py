@@ -63,6 +63,9 @@ class AnalyticsView:
         self.production_caption = th.text("", role="faint", size=10)
         self.operators_caption = th.text("", role="faint", size=10)
 
+        # Подписи месяцев живут отдельной неподвижной колонкой: раньше они
+        # ехали вместе с квадратами и при свайпе к концу месяца пропадали.
+        self.heatmap_months = ft.Column(spacing=HEAT_GAP, tight=True)
         self.heatmap_column = ft.Column(spacing=HEAT_GAP, tight=True)
         self.heatmap_legend = ft.Row(spacing=8, wrap=True)
 
@@ -105,7 +108,11 @@ class AnalyticsView:
                 th.text("МОЙ ГОД", size=12, weight=ft.FontWeight.BOLD),
                 th.text("Каждый квадрат — день. Пустые не отмечены.",
                         role="faint", size=10),
-                ft.Row([self.heatmap_column], scroll=ft.ScrollMode.HIDDEN),
+                ft.Row([
+                    self.heatmap_months,
+                    ft.Row([self.heatmap_column], scroll=ft.ScrollMode.HIDDEN,
+                           expand=True),
+                ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.START),
                 self.heatmap_legend,
             ], spacing=10, tight=True), padding=14),
             # Запас снизу не нужен: отступ под навигацией даёт распорка,
@@ -297,7 +304,7 @@ class AnalyticsView:
         # Год перечитывается при смене года или режима: ставка и лестница
         # премий у них разные, значит суммы тоже.
         if self.year_cache["year"] != year or self.year_cache["mode"] != mode:
-            shifts = db.get_year_shifts(year)
+            shifts = db.get_year_shifts(year, mode)
             self.year_cache["year"] = year
             self.year_cache["mode"] = mode
             self.year_cache["summaries"] = year_summaries(shifts, config)
@@ -344,15 +351,20 @@ class AnalyticsView:
         months = self.year_cache["heatmap"] or []
 
         rows = []
+        labels = []
         for index, days in enumerate(months):
-            cells = [ft.Container(
-                width=26, content=ft.Text(MONTH_SHORT[index], size=8,
-                                          color=th.color("text_faint")))]
+            labels.append(ft.Container(
+                width=26, height=HEAT_CELL,
+                alignment=ft.Alignment.CENTER_LEFT,
+                content=ft.Text(MONTH_SHORT[index], size=8,
+                                color=th.color("text_faint"))))
+            cells = []
             for _day, status in days:
                 cells.append(ft.Container(
                     width=HEAT_CELL, height=HEAT_CELL, border_radius=2,
                     bgcolor=self._heat_color(status)))
             rows.append(ft.Row(cells, spacing=HEAT_GAP, tight=True))
+        self.heatmap_months.controls = labels
         self.heatmap_column.controls = rows
 
         legend = []
