@@ -47,10 +47,12 @@ class CalendarView:
         ], alignment=ft.MainAxisAlignment.CENTER)
 
         self.grid = ft.Column(spacing=5, tight=True)
+        # th.text вместо ft.Text: прямой цвет застывал при сборке, и на
+        # светлой теме шапка недели оставалась белой на белом.
         self.grid.controls.append(ft.Row([
             ft.Container(
-                content=ft.Text(name, size=11, weight=ft.FontWeight.BOLD,
-                                color=th.color("text_faint")),
+                content=th.text(name, role="faint", size=11,
+                                weight=ft.FontWeight.BOLD),
                 expand=1, alignment=ft.Alignment.CENTER)
             for name in WEEKDAY_SHORT
         ], spacing=5))
