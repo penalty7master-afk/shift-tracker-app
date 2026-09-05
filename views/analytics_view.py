@@ -1,11 +1,12 @@
 import flet as ft
 import flet_charts as fch
 
-from calculations import (format_hours, format_money, format_weight,
+from calculations import (format_hours, format_money, format_weight, mode_of,
                           month_summary, my_shift_dates, operator_stats,
                           production_summary, year_heatmap, year_summaries)
 from constants import (HEATMAP_COLORS, HEATMAP_EMPTY, MONTH_SHORT, SHOP_KEYS,
-                       SHOP_SHORT, SHOP_TITLES, STATUS_WORK, tax_label)
+                       SHOP_SHORT, SHOP_TITLES, STATUS_DAY_OFF, STATUS_OVERSLEPT,
+                       STATUS_PREMIUM_OFF, STATUS_WORK, tax_label, term)
 from database import db
 from views.common import bind_event, refresh_tree, safe_update, touch
 
@@ -21,13 +22,15 @@ COLOR_EMPTY = "#4dffffff"
 
 
 class AnalyticsView:
-    """Пять разделов: моё за месяц, приход, производство, операторы, год."""
+    """Шесть разделов: моё за месяц, приход, производство, операторы,
+    год по месяцам, годовая карта."""
 
     def __init__(self, ctx):
         self.ctx = ctx
         self.th = ctx.theme
-        self.year_cache = {"year": None, "summaries": None, "heatmap": None}
-        self.only_mine = False        # переключатель в блоке производства
+        self.year_cache = {"year": None, "mode": None,
+                           "summaries": None, "heatmap": None}
+        self.only_mine = False
         self._build()
 
     # ==========================================
@@ -55,7 +58,10 @@ class AnalyticsView:
                                      active_color=th.accent())
         bind_event(self.mine_switch, self._on_mine_toggle,
                    "on_change", "on_changed")
+        self.production_title = th.text("", size=12, weight=ft.FontWeight.BOLD,
+                                        expand=True)
         self.production_caption = th.text("", role="faint", size=10)
+        self.operators_caption = th.text("", role="faint", size=10)
 
         self.heatmap_column = ft.Column(spacing=HEAT_GAP, tight=True)
         self.heatmap_legend = ft.Row(spacing=8, wrap=True)
@@ -75,8 +81,7 @@ class AnalyticsView:
 
             th.card(ft.Column([
                 ft.Row([
-                    th.text("ПРОИЗВОДСТВО ЗА МЕСЯЦ", size=12,
-                            weight=ft.FontWeight.BOLD, expand=True),
+                    self.production_title,
                     th.text("только мои", role="faint", size=10),
                     self.mine_switch,
                 ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
@@ -86,6 +91,7 @@ class AnalyticsView:
 
             th.card(ft.Column([
                 th.text("ОПЕРАТОРЫ", size=12, weight=ft.FontWeight.BOLD),
+                self.operators_caption,
                 self.operator_rows,
             ], spacing=10, tight=True), padding=14),
 
@@ -191,13 +197,15 @@ class AnalyticsView:
 
     def _refresh_production(self, production_data, shifts_data, config):
         th = self.th
+        mode = mode_of(config)
+        short = term(mode, "shifts_short")
         only = my_shift_dates(shifts_data) if self.only_mine else None
         stats = production_summary(production_data, config, only_dates=only)
 
+        self.production_title.value = term(mode, "production_title")
         self.production_caption.value = (
-            "Только ночи, в которые я был на смене."
-            if self.only_mine
-            else "По всем ночам, включая мои выходные.")
+            term(mode, "production_hint_mine") if self.only_mine
+            else term(mode, "production_hint_all"))
 
         controls = []
         for shop in SHOP_KEYS:
@@ -205,7 +213,7 @@ class AnalyticsView:
             controls.append(ft.Row([
                 th.text(SHOP_TITLES[shop], size=12, weight=ft.FontWeight.BOLD,
                         expand=True),
-                th.text(f"{row['nights']} ноч.", role="faint", size=10),
+                th.text(f"{row['nights']} {short}", role="faint", size=10),
             ]))
 
             if not row["nights"]:
@@ -216,7 +224,8 @@ class AnalyticsView:
             share = row["norm_ok"] / row["nights"]
             controls.append(th.text(
                 f"Всего {format_weight(row['total'])} кг · "
-                f"в среднем {format_weight(row['avg'])} кг за ночь",
+                f"в среднем {format_weight(row['avg'])} кг "
+                f"{term(mode, 'per_shift')}",
                 role="dim", size=11))
             controls.append(ft.ProgressBar(
                 value=share, color=COLOR_OK, bgcolor=COLOR_BAD,
@@ -231,7 +240,8 @@ class AnalyticsView:
                 controls.append(ft.Row([
                     ft.Text(f"   {product}", size=11,
                             color=th.color("text_dim"), expand=True),
-                    ft.Text(f"{format_weight(slot['weight'])} кг · {slot['nights']} ноч.",
+                    ft.Text(f"{format_weight(slot['weight'])} кг · "
+                            f"{slot['nights']} {short}",
                             size=11, color=th.color("text_faint")),
                 ]))
             controls.append(th.divider())
@@ -243,8 +253,15 @@ class AnalyticsView:
     # ---------- операторы ----------
     def _refresh_operators(self, production_data, config):
         th = self.th
+        mode = mode_of(config)
+        short = term(mode, "shifts_short")
         stats = operator_stats(production_data, config)
         peak = max([row["nights"] for row in stats.values()] + [1])
+
+        # Дневная и ночная выработка хранятся раздельно, поэтому цифры
+        # относятся только к текущему режиму — говорим об этом прямо.
+        self.operators_caption.value = (
+            f"Показана выработка {term(mode, 'per_shift')}.")
 
         controls = []
         for name, row in stats.items():
@@ -257,13 +274,13 @@ class AnalyticsView:
                     if cell["nights"]:
                         parts.append(f"{SHOP_SHORT[shop]}: "
                                      f"средн. {format_weight(cell['avg'])} кг "
-                                     f"({cell['nights']} ноч.)")
+                                     f"({cell['nights']} {short})")
                 detail = " · ".join(parts) if parts else "нет данных"
 
             controls.append(ft.Column([
                 ft.Row([
                     ft.Text(name, size=12, color=th.color("text"), expand=True),
-                    ft.Text(f"{row['nights']} ноч.", size=11,
+                    ft.Text(f"{row['nights']} {short}", size=11,
                             color=th.color("text_dim")),
                 ]),
                 ft.ProgressBar(value=row["nights"] / peak,
@@ -276,10 +293,13 @@ class AnalyticsView:
     # ---------- год ----------
     def _year_data(self, config):
         year = self.ctx.view["year"]
-        # Год перечитывается только при смене года, а не при каждом показе.
-        if self.year_cache["year"] != year:
+        mode = mode_of(config)
+        # Год перечитывается при смене года или режима: ставка и лестница
+        # премий у них разные, значит суммы тоже.
+        if self.year_cache["year"] != year or self.year_cache["mode"] != mode:
             shifts = db.get_year_shifts(year)
             self.year_cache["year"] = year
+            self.year_cache["mode"] = mode
             self.year_cache["summaries"] = year_summaries(shifts, config)
             self.year_cache["heatmap"] = year_heatmap(year, shifts)
         return year
@@ -337,9 +357,9 @@ class AnalyticsView:
 
         legend = []
         for label, status in (("смена", STATUS_WORK),
-                              ("вых. для премии", "Выходной для премии"),
-                              ("выходной", "Обычный выходной"),
-                              ("проспал", "Проспал")):
+                              ("вых. для премии", STATUS_PREMIUM_OFF),
+                              ("выходной", STATUS_DAY_OFF),
+                              ("проспал", STATUS_OVERSLEPT)):
             legend.append(ft.Row([
                 ft.Container(width=8, height=8, border_radius=2,
                              bgcolor=self._heat_color(status)),
