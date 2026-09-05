@@ -2,9 +2,11 @@ import calendar
 import re
 from datetime import date, datetime
 
-from constants import (ARRIVAL_OPTIONS, DEFAULT_CYCLE_START, EVENT_BREAK, EVENT_WORK,
-                       FULL_SHIFT_HOURS, LATE_SHIFT_HOURS, PREMIUM_LADDER,
-                       SHOP1, SHOP2, SHOP_KEYS, STATUS_PREMIUM_OFF, STATUS_WORK)
+from constants import (ARRIVAL_OPTIONS, DEFAULT_CYCLE_START, EVENT_BREAK,
+                       EVENT_MARK, EVENT_WORK, FULL_SHIFT_HOURS,
+                       LATE_SHIFT_HOURS, PREMIUM_LADDER, SHOP1, SHOP2,
+                       SHOP_KEYS, STATUS_OVERSLEPT, STATUS_PREMIUM_OFF,
+                       STATUS_WORK)
 
 
 # ==========================================
@@ -12,6 +14,11 @@ from constants import (ARRIVAL_OPTIONS, DEFAULT_CYCLE_START, EVENT_BREAK, EVENT_
 # ==========================================
 def format_money(value):
     return f"{int(round(value or 0)):,}".replace(",", " ") + " ₽"
+
+
+def format_signed_money(value):
+    sign = "+" if value >= 0 else "−"
+    return f"{sign}{format_money(abs(value))}"
 
 
 def format_hours(value):
@@ -33,17 +40,14 @@ _LEADING_NUMBER = re.compile(r"^\s*(\d+)")
 
 
 def product_sort_key(name):
-    """
-    Сортировка по числу в начале названия: 90, 90 ПВ, 200, 200 ПВ, 500, 500 ПВ.
-    Названия без числа (например «предпомол») уходят в конец по алфавиту.
-    """
+    """Сортировка по числу в начале названия: 90, 90 ПВ, 200, 200 ПВ.
+    Названия без числа уходят в конец по алфавиту."""
     text = (name or "").strip()
     match = _LEADING_NUMBER.match(text)
     if not match:
         return (1, 0, text.lower())
     number = int(match.group(1))
     rest = text[match.end():].strip().lower()
-    # внутри одного числа: сначала без индекса, потом с индексом
     return (0, number, rest)
 
 
@@ -62,10 +66,8 @@ def parse_cycle_start(value):
 
 
 def get_operator_for_date(date_obj, op_names, cycle_start=None):
-    """Каждый оператор выходит раз в четыре ночи, отсчёт от даты старта цикла."""
+    """Каждый оператор выходит раз в четыре ночи."""
     base = parse_cycle_start(cycle_start)
-    # Остаток от деления на положительное число в Python неотрицательный,
-    # поэтому даты до base обрабатываются корректно.
     return op_names[(date_obj - base).days % 4]
 
 
@@ -81,6 +83,10 @@ def hours_for_arrival(arrival_value):
 def month_dates(year, month):
     days = calendar.monthrange(year, month)[1]
     return [date(year, month, d) for d in range(1, days + 1)]
+
+
+def prev_month(year, month):
+    return (year - 1, 12) if month == 1 else (year, month - 1)
 
 
 def norm_for_shop(shop_key, config):
@@ -100,7 +106,7 @@ def premium_hours_for(shifts):
 
 
 def next_premium_step(shifts):
-    """(порог, часов_премии, сколько_смен_осталось) или None, если потолок взят."""
+    """(порог, часов_премии, сколько_смен_осталось) или None."""
     for threshold, hours in PREMIUM_LADDER:
         if shifts < threshold:
             return threshold, hours, threshold - shifts
@@ -127,10 +133,7 @@ def premium_progress(shifts):
 # МОИ ИТОГИ ЗА МЕСЯЦ
 # ==========================================
 def month_summary(shifts_data, config):
-    """
-    Считает по уже загруженному словарю смен месяца.
-    shifts_data: {"YYYY-MM-DD": {...}} — результат db.get_month_shifts().
-    """
+    """Считает по уже загруженному словарю смен месяца."""
     hour_rate = float(config.get("hour_rate") or 0.0)
     tax_rate = float(config.get("tax_rate") or 0.0)
 
@@ -141,7 +144,7 @@ def month_summary(shifts_data, config):
     late = 0
     overslept = 0
     premium_off = 0
-    premium_paid = 0.0     # фактически выплаченная премия за «выходной для премии»
+    premium_paid = 0.0
 
     for shift in shifts_data.values():
         status = shift.get("status")
@@ -154,10 +157,8 @@ def month_summary(shifts_data, config):
             continue
 
         if status != STATUS_WORK:
-            if status is not None and status != STATUS_WORK:
-                from constants import STATUS_OVERSLEPT
-                if status == STATUS_OVERSLEPT:
-                    overslept += 1
+            if status == STATUS_OVERSLEPT:
+                overslept += 1
             continue
 
         shifts += 1
@@ -199,11 +200,7 @@ def month_summary(shifts_data, config):
 
 
 def month_forecast(year, month, shifts_data, config, today=None):
-    """
-    Прикидка «если выйду во все оставшиеся дни месяца»:
-    фактически отработанные смены + все дни от сегодня до конца месяца,
-    по которым ещё ничего не отмечено. Только для текущего месяца.
-    """
+    """Прикидка «если выйду во все оставшиеся дни месяца»."""
     today = today or date.today()
     if (year, month) != (today.year, today.month):
         return None
@@ -232,6 +229,12 @@ def month_forecast(year, month, shifts_data, config, today=None):
     }
 
 
+def my_shift_dates(shifts_data):
+    """Даты, в которые я реально был на смене — фильтр для производства."""
+    return {date_str for date_str, shift in shifts_data.items()
+            if shift.get("status") == STATUS_WORK}
+
+
 # ==========================================
 # ПРОИЗВОДСТВО
 # ==========================================
@@ -243,10 +246,10 @@ def shop_values(record):
     }
 
 
-def production_summary(production_data, config):
+def production_summary(production_data, config, only_dates=None):
     """
-    Итоги производства за месяц по каждому цеху, независимо от того,
-    был я в ту ночь на смене или вносил данные из журнала.
+    Итоги производства за месяц по каждому цеху.
+    only_dates: множество дат — считать лишь по ним (мои смены).
     """
     result = {}
     for shop in SHOP_KEYS:
@@ -257,7 +260,9 @@ def production_summary(production_data, config):
             "by_product": {},
         }
 
-    for record in production_data.values():
+    for date_str, record in production_data.items():
+        if only_dates is not None and date_str not in only_dates:
+            continue
         for shop, (product, weight) in shop_values(record).items():
             if weight is None:
                 continue
@@ -327,6 +332,22 @@ def year_summaries(year_shifts, config):
     return [month_summary(buckets[m], config) for m in range(1, 13)]
 
 
+def year_heatmap(year, year_shifts):
+    """
+    Данные годовой карты: список месяцев, в каждом — список дней
+    (число, статус). Статус None означает, что день не отмечен.
+    """
+    months = []
+    for month in range(1, 13):
+        days = []
+        for day in range(1, calendar.monthrange(year, month)[1] + 1):
+            key = f"{year}-{month:02d}-{day:02d}"
+            shift = year_shifts.get(key)
+            days.append((day, (shift or {}).get("status")))
+        months.append(days)
+    return months
+
+
 # ==========================================
 # НОЧНОЙ ТРЕКЕР
 # ==========================================
@@ -341,8 +362,7 @@ def _to_seconds(hhmmss):
 def break_seconds(events):
     """
     Суммарная длительность перекуров.
-    events: последовательность (время, тип) в хронологическом порядке.
-    Перекур закрывается ближайшим следующим событием "Работа".
+    Перекур закрывается ближайшим следующим событием «Работа».
     """
     total = 0
     opened = None
@@ -360,6 +380,51 @@ def break_seconds(events):
             total += delta
             opened = None
     return total
+
+
+def parse_mark(event_type):
+    """Из «Отметка 1200» достаёт 1200.0. Не отметка — None."""
+    if not isinstance(event_type, str) or not event_type.startswith(EVENT_MARK):
+        return None
+    tail = event_type[len(EVENT_MARK):].strip()
+    try:
+        return float(tail.replace(",", "."))
+    except ValueError:
+        return None
+
+
+def output_curve(events):
+    """
+    Кривая выработки за ночь: [(минуты от старта, кг, темп кг/ч)].
+    Строится по событиям «Отметка N», где N — накопленные килограммы.
+    """
+    points = []
+    for item in events:
+        event_time, event_type = item[-2], item[-1]
+        weight = parse_mark(event_type)
+        if weight is None:
+            continue
+        seconds = _to_seconds(event_time)
+        if seconds is None:
+            continue
+        points.append((seconds, weight))
+    if len(points) < 2:
+        return []
+
+    start = points[0][0]
+    curve = []
+    prev_seconds, prev_weight = points[0]
+    for seconds, weight in points:
+        elapsed = seconds - start
+        if elapsed < 0:                   # переход через полночь
+            elapsed += 24 * 3600
+        gap = seconds - prev_seconds
+        if gap < 0:
+            gap += 24 * 3600
+        rate = ((weight - prev_weight) / (gap / 3600.0)) if gap else 0.0
+        curve.append((elapsed / 60.0, weight, max(0.0, rate)))
+        prev_seconds, prev_weight = seconds, weight
+    return curve
 
 
 def format_duration(seconds):
