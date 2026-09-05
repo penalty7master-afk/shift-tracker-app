@@ -1,22 +1,24 @@
-from datetime import datetime
+from datetime import date, datetime
 
 import flet as ft
 
 import haptics
-from calculations import format_hours, format_money, month_summary
-from constants import MONTH_NAMES
+from calculations import (format_hours, format_money, format_signed_money,
+                          month_summary, prev_month)
+from constants import MONTH_NAMES, STATUS_WORK
 from database import db
+from lock import IdleLock
 from theme import Theme
 from views.analytics_view import AnalyticsView
 from views.calendar_view import CalendarView
-from views.common import AppContext, bind_event, refresh_tree
+from views.common import AppContext, bind_event, force_close_dialog, refresh_tree
+from views.day_modal import drop_day_modal
 from views.pin_view import PinView
 from views.settings_view import SettingsView
 
 # Анимация смены экрана выключена намеренно. AnimatedSwitcher держит в дереве
 # сразу оба экрана и рисует их через слой прозрачности — отсюда была
-# «заморозка» при входе в настройки и выходе из них.
-# Поставь True, чтобы вернуть плавный переход.
+# «заморозка» при входе в настройки. Поставь True, чтобы вернуть переход.
 USE_SCREEN_ANIMATION = False
 SWITCHER_MS = 140
 
@@ -25,13 +27,11 @@ SWITCHER_MS = 140
 HEADER_CARD_HEIGHT = 104
 NAV_CARD_HEIGHT = 52
 
-# Жёсткий зазор между панелью и ближайшей карточкой. Именно эта величина
-# остаётся одинаковой на любом устройстве.
+# Жёсткий зазор между панелью и ближайшей карточкой — одинаков на любом
+# устройстве, меняется только системная часть отступа.
 GAP_TOP = 10
 GAP_BOTTOM = 10
 
-# Запасные значения системных отступов, пока page.media ещё не заполнена
-# (до первой отрисовки) или если платформа их не сообщает.
 FALLBACK_INSET_TOP = 28
 FALLBACK_INSET_BOTTOM = 24
 
@@ -45,10 +45,10 @@ def main(page: ft.Page):
     page.title = "КАЛЕНДАРЬ СМЕН PRO"
     page.padding = 0
 
-    # Виброотклик: сервис регистрируется один раз, дальше зовётся из экранов.
     haptics.setup(page)
 
     config = db.get_config()
+    haptics.set_enabled(bool(config.get("haptics", 1)))
     theme = Theme(config)
     ctx = AppContext(page, config, theme)
 
@@ -61,6 +61,9 @@ def main(page: ft.Page):
     stats_subtext = theme.text("", role="dim", size=11)
     settings_button = theme.icon_button(ft.Icons.SETTINGS, role="accent",
                                         on_click=lambda e: show_settings())
+    today_button = theme.icon_button(ft.Icons.TODAY, role="accent",
+                                     tooltip="Отметить сегодня",
+                                     on_click=lambda e: mark_today())
 
     header_card = theme.card(
         ft.Row([
@@ -68,21 +71,18 @@ def main(page: ft.Page):
                 theme.text("КАЛЕНДАРЬ СМЕН PRO", role="faint", size=11),
                 salary_text, stats_subtext,
             ], spacing=1, expand=True),
-            settings_button,
+            ft.Column([today_button, settings_button], spacing=0, tight=True),
         ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.START),
-        blur=True, height=HEADER_CARD_HEIGHT,
+        blur=True, height=HEADER_CARD_HEIGHT, stretch=False,
     )
 
     # ==========================================
     # СИСТЕМНЫЕ ОТСТУПЫ
     # ==========================================
     def system_inset(side):
-        """
-        Высота статус-бара / навигационной полосы в dp. Flet отдаёт их
-        в page.media и обновляет при повороте экрана, поэтому подбирать
-        числа под конкретный телефон не нужно.
-        """
+        """Высота статус-бара и навигационной полосы в dp: Flet отдаёт их
+        в page.media и обновляет при повороте экрана."""
         fallback = FALLBACK_INSET_TOP if side == "top" else FALLBACK_INSET_BOTTOM
         media = getattr(page, "media", None)
         padding = getattr(media, "padding", None) if media else None
@@ -91,23 +91,17 @@ def main(page: ft.Page):
             value = float(value)
         except (TypeError, ValueError):
             return fallback
-        # Ноль приходит до первой отрисовки — тогда честнее взять запасное.
         return value if value > 0 else fallback
 
     # ---------- экраны ----------
-    # Аналитика и настройки строятся при первом показе: раньше все четыре
-    # экрана висели в дереве постоянно и участвовали в каждом дифе.
     calendar_view = CalendarView(ctx)
     pin_view = PinView(ctx, on_success=lambda: show_main())
     screens = {}
     spacers = []
 
     def add_edge_spacers(control):
-        """
-        Пустые распорки внутри прокручиваемой колонки. Отступ должен жить
-        именно здесь, а не снаружи: если обрезать viewport padding'ом,
-        контент упрётся в границу и не сможет проехать под шапкой.
-        """
+        """Отступ живёт внутри прокрутки: если обрезать viewport padding'ом,
+        контент упрётся в границу и не сможет проехать под шапкой."""
         if not hasattr(control, "controls"):
             return
         top = ft.Container(height=1)
@@ -117,7 +111,6 @@ def main(page: ft.Page):
         spacers.append((top, bottom))
 
     def sync_spacers():
-        """Пересчитывает распорки под текущие системные отступы."""
         top_height = system_inset("top") + HEADER_CARD_HEIGHT + GAP_TOP
         bottom_height = system_inset("bottom") + NAV_CARD_HEIGHT + GAP_BOTTOM
         for top, bottom in spacers:
@@ -146,6 +139,7 @@ def main(page: ft.Page):
     tab_holder = ft.Container(content=calendar_view.control, expand=True)
 
     def on_tab_change(index):
+        ctx.touch()
         haptics.select()
         if index == 0:
             tab_holder.content = calendar_view.control
@@ -158,7 +152,7 @@ def main(page: ft.Page):
         paint_nav(index)
         refresh_tree(tab_holder, nav_bar)
 
-    # Стеклянная навигация вместо системного NavigationBar с чёрной плашкой
+    # ---------- навигация ----------
     nav_state = {"index": 0}
     nav_items = []
 
@@ -187,18 +181,21 @@ def main(page: ft.Page):
             text_control.color = color
             text_control.weight = ft.FontWeight.BOLD if active else None
 
+    # stretch=False: навигация остаётся «таблеткой» по центру, а не
+    # растягивается на всю ширину, как обычные карточки.
     nav_bar = theme.card(
         ft.Row([
             make_nav_item(0, ft.Icons.CALENDAR_MONTH, "Календарь"),
             make_nav_item(1, ft.Icons.BAR_CHART, "Аналитика"),
         ], alignment=ft.MainAxisAlignment.CENTER, spacing=10),
         blur=True, padding=6, border_radius=26, height=NAV_CARD_HEIGHT,
+        stretch=False,
     )
     paint_nav(0)
 
-    # Stack вместо Column: контент лежит на всю высоту экрана, шапка и
-    # навигация — поверх него. Только так карточки проезжают под стеклом,
-    # и backdrop-blur получает что размывать.
+    # Stack вместо Column: контент лежит на всю высоту, шапка и навигация —
+    # поверх него. Только так карточки проезжают под стеклом и блюр
+    # получает что размывать.
     main_layout = ft.Stack([
         ft.Container(
             expand=True,
@@ -217,8 +214,6 @@ def main(page: ft.Page):
     ], expand=True)
 
     # ---------- роутер ----------
-    # У обоих вариантов держателя есть .content, остальной код от выбора
-    # не зависит.
     if USE_SCREEN_ANIMATION and hasattr(ft, "AnimatedSwitcher"):
         screen_holder = ft.AnimatedSwitcher(
             content=ft.Container(), expand=True, duration=SWITCHER_MS,
@@ -228,15 +223,14 @@ def main(page: ft.Page):
         screen_holder = ft.Container(expand=True)
 
     def sync_switcher():
-        """В режиме скорости анимация экранов гасится полностью."""
         if hasattr(screen_holder, "duration"):
             screen_holder.duration = 0 if theme.simple_bg() else SWITCHER_MS
 
     def set_screen(control, full=False):
         screen_holder.content = control
-        # page.update() гоняет по сокету всё дерево (один календарь — это
-        # ~400 узлов), поэтому он остаётся только там, где реально менялись
-        # свойства самой страницы: bgcolor, theme, theme_mode.
+        # page.update() гоняет по сокету всё дерево (~400 узлов одного
+        # календаря), поэтому остаётся только там, где менялись свойства
+        # самой страницы: bgcolor, theme, theme_mode.
         if full:
             page.update()
         else:
@@ -261,9 +255,18 @@ def main(page: ft.Page):
             f"{format_hours(summary['total_hours'])} ч · "
             f"{summary['shifts']} смен · премия "
             f"{format_money(summary['premium_money'] + summary['premium_paid'])}")
-        # Точечное обновление: без него цифра в шапке ждала ближайшего
-        # общего page.update() и отставала от нижней карточки.
         refresh_tree(salary_text, stats_subtext, header_card)
+
+    def update_comparison(current_net):
+        """Сравнение с прошлым месяцем — один дополнительный запрос."""
+        year, month = prev_month(ctx.view["year"], ctx.view["month"])
+        previous = month_summary(db.get_month_shifts(year, month), config)
+        if not previous["shifts"] and not previous["premium_paid"]:
+            ctx.compare_text = ""
+            return
+        delta = current_net - previous["net"]
+        ctx.compare_text = (f"{format_signed_money(delta)} "
+                            f"к {MONTH_NAMES[month - 1].lower()}")
 
     def reload_month():
         """Единственное чтение месяца из БД — им пользуются все экраны."""
@@ -271,6 +274,7 @@ def main(page: ft.Page):
         ctx.month_data = db.get_month_shifts(year, month)
         ctx.production_data = db.get_month_production(year, month)
         ctx.timeline_dates = db.get_timeline_dates(year, month)
+        update_comparison(month_summary(ctx.month_data, config)["net"])
         update_header()
         calendar_view.refresh()
         ctx.analytics_dirty = True
@@ -285,8 +289,43 @@ def main(page: ft.Page):
             analytics.invalidate_year()
         reload_month()
 
+    # ---------- быстрый ввод ----------
+    def mark_today():
+        """Одно нажатие: сегодня — рабочая смена с приходом вовремя."""
+        ctx.touch()
+        today = date.today()
+        date_str = today.strftime("%Y-%m-%d")
+        existing = db.get_shift(date_str) or {}
+        if existing.get("status") == STATUS_WORK:
+            haptics.warn()
+            return
+
+        from constants import ARRIVAL_OPTIONS, FULL_SHIFT_HOURS
+        db.save_shift(date_str, FULL_SHIFT_HOURS, STATUS_WORK,
+                      ARRIVAL_OPTIONS[0], existing.get("note"), None)
+        haptics.confirm()
+
+        # Если открыт другой месяц — перебрасываем на текущий, иначе
+        # отметка появится «где-то там» и будет незаметна.
+        ctx.view["year"], ctx.view["month"] = today.year, today.month
+        refresh_after_change()
+
+    # ---------- автоблокировка ----------
+    def do_lock():
+        """Сначала закрываем диалог: AlertDialog живёт в отдельном слое
+        над деревом, подмена экрана его не убирает — он остался бы
+        висеть поверх PIN."""
+        force_close_dialog(ctx)
+        show_pin()
+
+    idle_lock = IdleLock(on_lock=do_lock)
+    idle_lock.set_dirty_check(lambda: bool(ctx.dialog_dirty))
+    ctx.touch = idle_lock.touch
+    ctx.on_unlock = idle_lock.arm
+
     # ---------- переходы ----------
     def show_pin(force_setup=False):
+        idle_lock.disarm()
         pin_view.show(force_setup=force_setup)
         changed = theme.apply(page)
         sync_switcher()
@@ -296,8 +335,6 @@ def main(page: ft.Page):
         changed = theme.apply(page)
         paint_nav(nav_state["index"])
         sync_switcher()
-        # Считаем отступы здесь: к моменту показа главного экрана страница
-        # уже отрисована и page.media заполнена реальными значениями.
         sync_spacers()
         analytics = screens.get("analytics")
         if analytics is not None:
@@ -306,6 +343,7 @@ def main(page: ft.Page):
         set_screen(main_layout, full=changed)
 
     def show_settings():
+        ctx.touch()
         view = get_settings()
         view.load()
         changed = theme.apply(page)
@@ -313,12 +351,17 @@ def main(page: ft.Page):
         set_screen(view.control, full=changed)
 
     def on_layout_change(e=None):
-        """Поворот экрана или смена системных панелей — пересчитываем."""
         sync_spacers()
 
-    # Имя события отличается между сборками Flet — привязываем безопасно.
+    def on_app_state(e=None):
+        idle_lock.handle_app_state(getattr(e, "data", None) or e)
+
+    # Имена событий отличаются между сборками Flet — привязываем безопасно.
     bind_event(page, on_layout_change,
                "on_media_change", "on_media_changed", "on_resized", "on_resize")
+    bind_event(page, on_app_state,
+               "on_app_lifecycle_state_change", "on_app_lifecycle_state",
+               "on_lifecycle_state_change")
 
     ctx.show_pin = show_pin
     ctx.show_main = show_main
@@ -328,6 +371,6 @@ def main(page: ft.Page):
     ctx.apply_theme = apply_theme
 
     # ---------- старт ----------
-    # Один фон на всё приложение вместо отдельного на каждом экране.
+    drop_day_modal()
     page.add(ft.Stack(expand=True, controls=[theme.background(), screen_holder]))
     show_pin()
