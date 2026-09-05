@@ -9,10 +9,10 @@ from constants import (DEFAULT_ACCENT, DEFAULT_BG_THEME, DEFAULT_CYCLE_START,
 
 PBKDF2_ROUNDS = 100_000
 
-# Колонки app_config, которые разрешено писать через save_config()
 CONFIG_WRITABLE = (
     "hour_rate", "theme", "bg_theme", "op1", "op2", "op3", "op4",
     "tax_rate", "cycle_start", "simple_bg", "norm_shop1", "norm_shop2",
+    "haptics",
 )
 
 CONFIG_DEFAULTS = {
@@ -28,6 +28,7 @@ CONFIG_DEFAULTS = {
     "simple_bg": 0,
     "norm_shop1": DEFAULT_NORM_SHOP1,
     "norm_shop2": DEFAULT_NORM_SHOP2,
+    "haptics": 1,
 }
 
 
@@ -39,12 +40,10 @@ class DBManager:
     Две независимые сущности:
       shifts     — мой день (работал / выходной / проспал, часы, приход, заметка);
       production — ночь производства (оператор, продукт и кг по каждому цеху).
-    Производство можно вносить и за те ночи, когда меня на смене не было.
     """
 
     def __init__(self):
         # На Android рабочая директория недоступна для записи.
-        # Flet передаёт путь к хранилищу приложения в FLET_APP_STORAGE_DATA.
         db_dir = os.getenv("FLET_APP_STORAGE_DATA") or "."
         os.makedirs(db_dir, exist_ok=True)
         self.db_path = os.path.join(db_dir, "shifts_pro.db")
@@ -121,7 +120,8 @@ class DBManager:
                 cycle_start TEXT,
                 simple_bg INTEGER,
                 norm_shop1 REAL,
-                norm_shop2 REAL
+                norm_shop2 REAL,
+                haptics INTEGER
             )
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_timeline_date ON timeline(date)")
@@ -148,6 +148,7 @@ class DBManager:
             "simple_bg": "INTEGER",
             "norm_shop1": "REAL",
             "norm_shop2": "REAL",
+            "haptics": "INTEGER",
         })
         self.conn.commit()
 
@@ -183,12 +184,13 @@ class DBManager:
         cfg["norm_shop1"] = float(cfg["norm_shop1"])
         cfg["norm_shop2"] = float(cfg["norm_shop2"])
         cfg["simple_bg"] = int(cfg["simple_bg"] or 0)
+        cfg["haptics"] = int(cfg["haptics"] if cfg.get("haptics") is not None else 1)
         cfg.setdefault("pin_hash", None)
         cfg.setdefault("pin_salt", None)
         return cfg
 
     def save_config(self, **values):
-        """Пишет только переданные и разрешённые поля — остальные не трогает."""
+        """Пишет только переданные и разрешённые поля."""
         fields = {k: v for k, v in values.items() if k in CONFIG_WRITABLE}
         if not fields:
             return
@@ -213,10 +215,8 @@ class DBManager:
         self.conn.commit()
 
     def verify_pin(self, pin):
-        """
-        Поддерживает старый формат (голый sha256 без соли): при успешной
-        проверке PIN молча пересохраняется в новом формате с солью.
-        """
+        """Поддерживает старый формат (голый sha256 без соли): при успешной
+        проверке PIN молча пересохраняется в новом формате с солью."""
         cur = self.conn.cursor()
         cur.execute("SELECT pin_hash, pin_salt FROM app_config WHERE id=1")
         row = cur.fetchone()
@@ -283,7 +283,6 @@ class DBManager:
         self.conn.commit()
 
     def get_shift(self, date_str):
-        """Один день — вместо загрузки всего месяца ради модалки."""
         cur = self.conn.cursor()
         cur.execute(f"SELECT {self.SHIFT_FIELDS} FROM shifts WHERE date=?", (date_str,))
         row = cur.fetchone()
@@ -322,7 +321,7 @@ class DBManager:
 
     def save_production(self, date_str, operator, product1, weight1,
                         product2, weight2):
-        """Если за ночь ничего не заполнено — запись удаляется, а не хранится пустой."""
+        """Если за ночь ничего не заполнено — запись удаляется."""
         if not operator and weight1 is None and weight2 is None:
             self.delete_production(date_str)
             return
@@ -372,6 +371,15 @@ class DBManager:
                     "ORDER BY date")
         return [r[0] for r in cur.fetchall()]
 
+    def get_month_dates(self, year, month):
+        """Даты месяца, по которым есть данные — для PDF-табеля."""
+        start, end = self._month_bounds(year, month)
+        cur = self.conn.cursor()
+        cur.execute("SELECT date FROM shifts WHERE date >= ? AND date < ? "
+                    "UNION SELECT date FROM production WHERE date >= ? AND date < ? "
+                    "ORDER BY date", (start, end, start, end))
+        return [r[0] for r in cur.fetchall()]
+
     # ==========================================
     # НОЧНОЙ ТРЕКЕР
     # ==========================================
@@ -396,8 +404,7 @@ class DBManager:
         return cur.fetchall()
 
     def get_timeline_dates(self, year, month):
-        """Даты месяца, где есть хотя бы одно событие трекера.
-        Идёт по индексу idx_timeline_date, поэтому дешёвый."""
+        """Даты месяца, где есть хотя бы одно событие трекера."""
         start, end = self._month_bounds(year, month)
         cur = self.conn.cursor()
         cur.execute("SELECT DISTINCT date FROM timeline WHERE date >= ? AND date < ?",
