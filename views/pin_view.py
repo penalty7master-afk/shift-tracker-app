@@ -14,7 +14,6 @@ MAX_PIN = 6
 KEY_SIZE = 68
 KEY_GAP = 16
 
-# Буквы под цифрами — как на клавиатуре телефона
 KEY_LETTERS = {
     "2": "ABC", "3": "DEF", "4": "GHI", "5": "JKL",
     "6": "MNO", "7": "PQRS", "8": "TUV", "9": "WXYZ",
@@ -24,10 +23,7 @@ ERROR_COLOR = "#fca5a5"
 
 
 class PinView:
-    """
-    Цифровая клавиатура вместо TextField: системная клавиатура не всплывает.
-    Введённые цифры живут в обычной строке, поля ввода на экране нет вообще.
-    """
+    """Цифровая клавиатура вместо TextField: системная клавиатура не всплывает."""
 
     def __init__(self, ctx, on_success):
         self.ctx = ctx
@@ -80,8 +76,7 @@ class PinView:
 
     @staticmethod
     def _slot(content=None):
-        """Слот фиксированной ширины: держит столбцы выровненными,
-        даже когда кнопка внутри скрыта."""
+        """Слот фиксированной ширины держит столбцы выровненными."""
         return ft.Container(width=KEY_SIZE, height=KEY_SIZE, content=content)
 
     def _digit_key(self, digit):
@@ -106,8 +101,7 @@ class PinView:
                                spacing=KEY_GAP, tight=True,
                                alignment=ft.MainAxisAlignment.CENTER))
 
-        # Нижний ряд: галочка стоит в столбце семёрки, то есть прямо под ней.
-        # Семёрка при этом никуда не девается.
+        # Галочка стоит в столбце семёрки; сама семёрка никуда не девается.
         self.confirm_slot = self._slot(th.glass_key(
             ft.Icon(ft.Icons.CHECK, size=24, color=th.accent()),
             self._commit_setup, size=KEY_SIZE))
@@ -149,10 +143,8 @@ class PinView:
             dot.border = ft.Border.all(1, ERROR_COLOR)
 
     def _confirm_threshold(self):
-        """
-        При первом наборе кнопка появляется с четвёртой цифры.
-        При повторе — ровно с той длины, что была задана в первый раз.
-        """
+        """При первом наборе кнопка появляется с четвёртой цифры,
+        при повторе — с той длины, что была задана в первый раз."""
         if self.mode == "setup_confirm" and self.first_pin:
             return len(self.first_pin)
         return MIN_PIN
@@ -220,7 +212,7 @@ class PinView:
         self._sync_confirm()
         self._refresh()
 
-        # При обычном входе подтверждать нечем — проверяем сами с четвёртой цифры.
+        # При обычном входе подтверждать нечем — проверяем с четвёртой цифры.
         if self.mode == "verify" and len(self.digits) >= MIN_PIN:
             self._try_verify()
 
@@ -239,21 +231,26 @@ class PinView:
         self._paint_dots()
         self._sync_confirm()
 
+    def _unlocked(self):
+        """Разблокировка: запускаем отсчёт бездействия заново."""
+        callback = getattr(self.ctx, "on_unlock", None)
+        if callable(callback):
+            callback()
+        self.on_success()
+
     # ==========================================
     # ПРОВЕРКА И СОЗДАНИЕ
     # ==========================================
     def _try_verify(self):
-        """
-        Проверяем на каждой цифре начиная с четвёртой — так работают
-        короткие PIN-коды. Попытку тратим только когда набраны все шесть.
-        """
+        """Проверяем на каждой цифре начиная с четвёртой — так работают
+        короткие PIN. Попытку тратим только когда набраны все шесть."""
         if db.verify_pin(self.digits):
             haptics.confirm()
             self.attempts = 0
             self.lockouts = 0
             self._reset_input()
             self.error.value = ""
-            self.on_success()
+            self._unlocked()
             return
 
         if len(self.digits) < MAX_PIN:
@@ -294,7 +291,7 @@ class PinView:
             self.ctx.config.update(db.get_config())
             self._reset_input()
             self.error.value = ""
-            self.on_success()
+            self._unlocked()
             return
 
         haptics.error()
