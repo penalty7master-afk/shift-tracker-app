@@ -2,16 +2,20 @@ from datetime import datetime
 
 import flet as ft
 
+import haptics
 from calculations import format_weight
 from constants import (DEFAULT_ACCENT, DEFAULT_BG_THEME, SHOP1, SHOP2,
                        SHOP_TITLES, TAX_OPTIONS, THEME_ACCENTS,
                        THEME_BACKGROUNDS, WEIGHT_MAX)
 from database import db
-from exporter import backup_database, export_csv, find_backups, restore_database
+from exporter import (backup_database, export_csv, export_pdf, find_backups,
+                      restore_database)
+from views.color_picker import show_color_picker
 from views.common import (bind_event, confirm_dialog, info_dialog, refresh_tree,
-                          safe_update)
+                          release_focus, safe_update, touch)
 
 BACK_KEY_SIZE = 46
+SWATCH_SIZE = 42
 
 
 class SettingsView:
@@ -19,7 +23,7 @@ class SettingsView:
         self.ctx = ctx
         self.page = ctx.page
         self.th = ctx.theme
-        self.pending_delete = None   # продукт, для которого показано подтверждение
+        self.pending_delete = None
         self._build()
 
     # ==========================================
@@ -30,14 +34,22 @@ class SettingsView:
 
         self.rate_field = th.field(label="Стоимость 1 часа оклада (₽)",
                                    keyboard_type=ft.KeyboardType.NUMBER)
-        self.op_fields = [th.field(label=f"Оператор {i}", expand=True)
+        bind_event(self.rate_field, self._validate_rate, "on_blur")
+
+        # Имена операторов по центру ячейки
+        self.op_fields = [th.field(label=f"Оператор {i}", expand=True,
+                                   text_align=ft.TextAlign.CENTER)
                           for i in range(1, 5)]
+
         self.cycle_field = th.field(label="Старт графика (ГГГГ-ММ-ДД)")
+        bind_event(self.cycle_field, self._validate_cycle, "on_blur")
 
         self.norm1_field = th.field(label=SHOP_TITLES[SHOP1], expand=True,
                                     keyboard_type=ft.KeyboardType.NUMBER)
         self.norm2_field = th.field(label=SHOP_TITLES[SHOP2], expand=True,
                                     keyboard_type=ft.KeyboardType.NUMBER)
+        bind_event(self.norm1_field, self._validate_norms, "on_blur")
+        bind_event(self.norm2_field, self._validate_norms, "on_blur")
 
         self._build_tax()
         self._build_theme()
@@ -51,8 +63,6 @@ class SettingsView:
             self._back, size=BACK_KEY_SIZE)
 
         self.control = ft.Column([
-            # SafeArea: без неё стрелка «Назад» уезжает под системные часы.
-            # Отступ слева, чтобы кнопка не липла к краю экрана.
             ft.SafeArea(content=ft.Container(
                 padding=ft.Padding.only(top=8, bottom=4, left=6),
                 content=ft.Row([
@@ -74,8 +84,6 @@ class SettingsView:
                         weight=ft.FontWeight.BOLD),
                 self.norm1_field,
                 self.norm2_field,
-                th.text("Норма относится к цеху, а не к продукции.",
-                        role="faint", size=10),
             ], spacing=10, tight=True)),
 
             th.card(ft.Column([
@@ -99,13 +107,11 @@ class SettingsView:
                 th.text("Отключает блюр, светящиеся сферы и анимацию переходов. "
                         "Включайте, если интерфейс подтормаживает.",
                         role="faint", size=10),
+                self.haptics_switch,
             ], spacing=10, tight=True)),
 
             th.card(ft.Column([
                 th.text("Каталог продукции", size=12, weight=ft.FontWeight.BOLD),
-                th.text("Список сортируется по числу в названии: 90, 90 ПВ, "
-                        "200, 200 ПВ, 500, 500 ПВ, затем остальное.",
-                        role="faint", size=10),
                 ft.Row([self.new_product_input, self.add_product_button], spacing=8),
                 th.divider(),
                 self.products_list,
@@ -113,21 +119,20 @@ class SettingsView:
 
             th.card(ft.Column([
                 th.text("Данные", size=12, weight=ft.FontWeight.BOLD),
-                ft.Row([self.export_button, self.backup_button], spacing=8),
-                self.restore_button,
+                ft.Row([self.export_button, self.pdf_button], spacing=8),
+                ft.Row([self.backup_button, self.restore_button], spacing=8),
                 self.data_hint,
             ], spacing=10, tight=True)),
 
             self.error_text,
-            # Колонка выровнена по левому краю, поэтому кнопки фиксированной
-            # ширины центрируем каждой своей строкой.
             ft.Row([ft.OutlinedButton("Сменить PIN-код",
                                       on_click=self._change_pin, width=300)],
                    alignment=ft.MainAxisAlignment.CENTER),
-            ft.Row([ft.ElevatedButton("Сохранить", on_click=self._save, width=300)],
+            # «Готово» вместо «Сохранить»: акцент, фон и каталог пишутся
+            # сразу, а ставка, нормы, операторы и налог — только отсюда,
+            # с проверкой введённого.
+            ft.Row([ft.ElevatedButton("Готово", on_click=self._save, width=300)],
                    alignment=ft.MainAxisAlignment.CENTER),
-            # Запас снизу: иначе кнопку «Сохранить» перекрывают системные
-            # кнопки навигации телефона.
             ft.Container(height=90),
         ], spacing=14, scroll=ft.ScrollMode.AUTO, expand=True)
 
@@ -149,6 +154,8 @@ class SettingsView:
         )
 
     def _select_tax(self, rate):
+        touch(self.ctx)
+        haptics.select()
         self.tax_value = rate
         self._paint_tax()
         safe_update(self.tax_row)
@@ -165,15 +172,30 @@ class SettingsView:
     def _build_theme(self):
         th = self.th
         self.accent_cells = []
+        cells = []
         for name, color in THEME_ACCENTS.items():
             cell = ft.Container(
-                width=42, height=42, border_radius=21, bgcolor=color,
-                tooltip=name,
+                width=SWATCH_SIZE, height=SWATCH_SIZE, border_radius=SWATCH_SIZE // 2,
+                bgcolor=color, tooltip=name,
                 on_click=lambda e, n=name: self._select_accent(n),
             )
             self.accent_cells.append((cell, name))
-        self.accent_row = ft.Row([cell for cell, _n in self.accent_cells],
-                                 spacing=10, wrap=True)
+            cells.append(cell)
+
+        # Шестая кнопка: произвольный цвет из палитры
+        self.custom_cell = ft.Container(
+            width=SWATCH_SIZE, height=SWATCH_SIZE, border_radius=SWATCH_SIZE // 2,
+            tooltip="Свой цвет",
+            gradient=ft.SweepGradient(colors=[
+                "#ff6b6b", "#ffd166", "#6ee7b7", "#7dd3fc",
+                "#c9a6ff", "#f9a8d4", "#ff6b6b",
+            ]),
+            content=ft.Icon(ft.Icons.COLORIZE, size=18, color="#ffffff"),
+            alignment=ft.Alignment.CENTER,
+            on_click=self._open_picker,
+        )
+        cells.append(self.custom_cell)
+        self.accent_row = ft.Row(cells, spacing=10, wrap=True)
 
         self.bg_cells = []
         rows = []
@@ -199,23 +221,48 @@ class SettingsView:
         bind_event(self.simple_bg_switch, self._on_simple_bg,
                    "on_change", "on_changed")
 
+        self.haptics_switch = ft.Switch(label="Виброотклик",
+                                        active_color=th.accent())
+        bind_event(self.haptics_switch, self._on_haptics,
+                   "on_change", "on_changed")
+
     def _select_accent(self, name):
+        touch(self.ctx)
+        haptics.select()
         self.ctx.config["theme"] = name
         self._apply_and_stay()
 
+    def _open_picker(self, e=None):
+        touch(self.ctx)
+
+        def apply(color):
+            self.ctx.config["theme"] = color
+            self._apply_and_stay()
+
+        show_color_picker(self.ctx, self.ctx.config.get("theme"), apply)
+
     def _select_bg(self, name):
+        touch(self.ctx)
+        haptics.select()
         self.ctx.config["bg_theme"] = name
         self._apply_and_stay()
 
     def _on_simple_bg(self, e=None):
+        touch(self.ctx)
         self.ctx.config["simple_bg"] = 1 if self.simple_bg_switch.value else 0
         self._apply_and_stay()
 
+    def _on_haptics(self, e=None):
+        touch(self.ctx)
+        enabled = bool(self.haptics_switch.value)
+        self.ctx.config["haptics"] = 1 if enabled else 0
+        haptics.set_enabled(enabled)
+        if enabled:
+            haptics.confirm()
+        db.save_config(haptics=1 if enabled else 0)
+
     def _apply_and_stay(self):
-        """
-        Перекрашивает интерфейс, не сбрасывая прокрутку. Полный page.update()
-        отматывал настройки в начало при каждом выборе фона.
-        """
+        """Перекрашивает интерфейс, не сбрасывая прокрутку."""
         self.ctx.theme.apply(self.page)
         # Фон живёт в корневом Stack вне дерева настроек: без этой строки
         # выбранная тональность появлялась только после следующего действия.
@@ -223,16 +270,24 @@ class SettingsView:
         self._paint_theme_selection()
         self._paint_tax()
         self._refresh_products()
+        self.simple_bg_switch.active_color = self.th.accent()
+        self.haptics_switch.active_color = self.th.accent()
         refresh_tree(self.accent_row, self.bg_column, self.tax_row,
                      self.products_list, self.control)
 
     def _paint_theme_selection(self):
         th = self.th
-        current_accent = self.ctx.config.get("theme")
+        current = self.ctx.config.get("theme")
+        custom = isinstance(current, str) and current.startswith("#")
+
         for cell, name in self.accent_cells:
-            selected = (name == current_accent)
+            selected = (not custom) and (name == current)
             cell.border = ft.Border.all(3, th.color("text")) if selected else None
             cell.scale = 1.0 if selected else 0.86
+
+        self.custom_cell.border = (ft.Border.all(3, th.color("text")) if custom
+                                   else None)
+        self.custom_cell.scale = 1.0 if custom else 0.86
 
         current_bg = self.ctx.config.get("bg_theme")
         for row, label, name in self.bg_cells:
@@ -251,10 +306,8 @@ class SettingsView:
         self.products_list = ft.Column(spacing=4, tight=True)
 
     def _refresh_products(self):
-        """
-        Подтверждение удаления показывается прямо в строке, без диалога:
-        открытие AlertDialog заставляло страницу настроек прыгать наверх.
-        """
+        """Подтверждение удаления показывается прямо в строке: диалог
+        заставлял страницу настроек прыгать наверх."""
         th = self.th
         controls = []
         for name in db.get_products():
@@ -280,6 +333,7 @@ class SettingsView:
         self.products_list.controls = controls
 
     def _ask_delete(self, name):
+        touch(self.ctx)
         self.pending_delete = name
         self._refresh_products()
         safe_update(self.products_list)
@@ -296,12 +350,14 @@ class SettingsView:
         safe_update(self.products_list)
 
     def _add_product(self, e=None):
+        touch(self.ctx)
         name = (self.new_product_input.value or "").strip()
         if not name:
             return
         if db.add_product(name):
             self.new_product_input.value = ""
             self.new_product_input.error_text = None
+            release_focus(self.page, self.new_product_input)
         else:
             self.new_product_input.error_text = "Такой продукт уже есть"
         self.pending_delete = None
@@ -312,13 +368,16 @@ class SettingsView:
     def _build_data(self):
         self.export_button = ft.OutlinedButton("Экспорт CSV", expand=True,
                                                on_click=self._export_csv)
+        self.pdf_button = ft.OutlinedButton("Экспорт PDF", expand=True,
+                                            on_click=self._export_pdf)
         self.backup_button = ft.OutlinedButton("Бэкап базы", expand=True,
                                                on_click=self._backup)
-        self.restore_button = ft.OutlinedButton("Восстановить из бэкапа", width=300,
+        self.restore_button = ft.OutlinedButton("Восстановить", expand=True,
                                                 on_click=self._restore)
         self.data_hint = self.th.text("", role="faint", size=10)
 
     def _export_csv(self, e=None):
+        touch(self.ctx)
         try:
             path = export_csv()
         except Exception as error:
@@ -328,7 +387,19 @@ class SettingsView:
                     f"Файл сохранён:\n\n{path}\n\nОткройте его файловым "
                     "менеджером или отправьте себе.")
 
+    def _export_pdf(self, e=None):
+        touch(self.ctx)
+        year, month = self.ctx.view["year"], self.ctx.view["month"]
+        try:
+            path = export_pdf(year, month, self.ctx.config)
+        except Exception as error:
+            info_dialog(self.ctx, "Не удалось выгрузить", str(error))
+            return
+        info_dialog(self.ctx, "PDF готов",
+                    f"Табель за выбранный месяц сохранён:\n\n{path}")
+
     def _backup(self, e=None):
+        touch(self.ctx)
         try:
             path = backup_database()
         except Exception as error:
@@ -337,6 +408,7 @@ class SettingsView:
         info_dialog(self.ctx, "Бэкап создан", f"Файл базы сохранён:\n\n{path}")
 
     def _restore(self, e=None):
+        touch(self.ctx)
         backups = find_backups()
         if not backups:
             info_dialog(self.ctx, "Бэкапы не найдены",
@@ -374,18 +446,25 @@ class SettingsView:
         self.norm2_field.value = format_weight(config["norm_shop2"]).replace(" ", "")
         for index, field in enumerate(self.op_fields):
             field.value = config[f"op{index + 1}"]
+            field.error_text = None
 
         self.tax_value = config["tax_rate"]
         self._paint_tax()
         self._paint_theme_selection()
         self.simple_bg_switch.value = bool(config["simple_bg"])
+        self.haptics_switch.value = bool(config.get("haptics", 1))
+        self.rate_field.error_text = None
+        self.cycle_field.error_text = None
+        self.norm1_field.error_text = None
+        self.norm2_field.error_text = None
         self.error_text.value = ""
         self.new_product_input.error_text = None
         self.pending_delete = None
         self._refresh_products()
-        self.data_hint.value = ("CSV открывается в Excel. Бэкап — полная копия "
-                                "базы, её можно вернуть на любом устройстве.")
+        self.data_hint.value = ("CSV открывается в Excel, PDF — готовый табель "
+                                "за текущий месяц. Бэкап — полная копия базы.")
 
+    # ---------- валидация на лету ----------
     def _read_number(self, field, minimum=0.0):
         try:
             value = float((field.value or "").replace(",", ".").replace(" ", ""))
@@ -403,6 +482,22 @@ class SettingsView:
         except ValueError:
             return None
 
+    def _validate_rate(self, e=None):
+        bad = self._read_number(self.rate_field) is None
+        self.rate_field.error_text = "Введите число больше нуля" if bad else None
+        safe_update(self.rate_field)
+
+    def _validate_norms(self, e=None):
+        for field in (self.norm1_field, self.norm2_field):
+            bad = self._read_number(field) is None
+            field.error_text = "Введите число больше нуля" if bad else None
+            safe_update(field)
+
+    def _validate_cycle(self, e=None):
+        bad = self._read_cycle_start() is None
+        self.cycle_field.error_text = "Формат ГГГГ-ММ-ДД" if bad else None
+        safe_update(self.cycle_field)
+
     def _persist(self, rate, norm1, norm2):
         names = [(field.value or "").strip() or f"Оператор {i + 1}"
                  for i, field in enumerate(self.op_fields)]
@@ -414,27 +509,38 @@ class SettingsView:
             tax_rate=self.tax_value,
             cycle_start=self._read_cycle_start() or self.ctx.config["cycle_start"],
             simple_bg=1 if self.simple_bg_switch.value else 0,
+            haptics=1 if self.haptics_switch.value else 0,
             norm_shop1=norm1, norm_shop2=norm2,
         )
         self.ctx.config.update(db.get_config())
 
     def _save(self, e=None):
+        touch(self.ctx)
+        release_focus(self.page, self.rate_field, self.cycle_field,
+                      self.norm1_field, self.norm2_field,
+                      self.new_product_input, *self.op_fields)
+
         rate = self._read_number(self.rate_field)
         if rate is None:
+            self._validate_rate()
             self.error_text.value = "Некорректная ставка"
             safe_update(self.error_text)
             return
         norm1 = self._read_number(self.norm1_field)
         norm2 = self._read_number(self.norm2_field)
         if norm1 is None or norm2 is None:
+            self._validate_norms()
             self.error_text.value = "Некорректная норма выработки"
             safe_update(self.error_text)
             return
         if self._read_cycle_start() is None:
+            self._validate_cycle()
             self.error_text.value = "Дата старта графика в формате ГГГГ-ММ-ДД"
             safe_update(self.error_text)
             return
+
         self._persist(rate, norm1, norm2)
+        haptics.confirm()
         self.ctx.show_main()
 
     def _fallback_persist(self):
@@ -447,10 +553,12 @@ class SettingsView:
         )
 
     def _back(self, e=None):
+        touch(self.ctx)
         self._fallback_persist()
         self.ctx.show_main()
 
     def _change_pin(self, e=None):
+        touch(self.ctx)
         # PIN не стираем заранее: старый хеш живёт до подтверждения нового
         self._fallback_persist()
         self.ctx.show_pin(force_setup=True)
